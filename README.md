@@ -1,1 +1,1 @@
-# Ripple_AI
+# AI_Ripple_Grader
