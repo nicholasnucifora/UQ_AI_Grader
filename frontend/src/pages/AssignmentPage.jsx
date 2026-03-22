@@ -4,7 +4,7 @@ import Layout from '../components/Layout'
 import SubmitAssignmentModal from '../components/SubmitAssignmentModal'
 import { useAuth } from '../contexts/AuthContext'
 import { api } from '../api/client'
-import { GradeResultsTable, TeacherGradingPanel } from '../components/Marking'
+import { StudentGradeTable, TeacherGradingPanel } from '../components/Marking'
 
 export default function AssignmentPage() {
   const { id: classId, aid: assignmentId } = useParams()
@@ -23,7 +23,6 @@ export default function AssignmentPage() {
   const [gradeJob, setGradeJob] = useState(null)
   const [gradeResults, setGradeResults] = useState(null)
   const [gradeReport, setGradeReport] = useState(null)
-  const [expandedResult, setExpandedResult] = useState(null)
   const [gradingError, setGradingError] = useState(null)
   const [startingGrading, setStartingGrading] = useState(false)
   const [rubricData, setRubricData] = useState(null)
@@ -241,6 +240,14 @@ export default function AssignmentPage() {
     return api.openGradeEmail(classId, assignmentId, resultId, toEmail)
   }
 
+  async function handleEmailStudentAll(studentId, toEmail) {
+    return api.openStudentGradeEmail(classId, assignmentId, studentId, { toEmail })
+  }
+
+  async function handleEmailStudentTopic(studentId, topic, toEmail) {
+    return api.openStudentGradeEmail(classId, assignmentId, studentId, { toEmail, topic })
+  }
+
   async function handleSaveTeacherGrade(resultId, criterionGrades) {
     setGradingError(null)
     try {
@@ -369,7 +376,7 @@ export default function AssignmentPage() {
                     ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
                     : 'bg-indigo-600 text-white hover:bg-indigo-700'
                 }`}>
-                  {rippleImporting ? 'Importing…' : 'Upload CSV'}
+                  {rippleImporting ? 'Importing…' : 'Import CSV'}
                   <input
                     type="file"
                     accept=".csv"
@@ -393,8 +400,6 @@ export default function AssignmentPage() {
             gradeJob={gradeJob && !gradeJob.is_preview ? gradeJob : null}
             gradeResults={gradeResults}
             gradeReport={gradeReport}
-            expandedResult={expandedResult}
-            setExpandedResult={setExpandedResult}
             gradingError={gradingError}
             setGradingError={setGradingError}
             startingGrading={startingGrading}
@@ -407,6 +412,8 @@ export default function AssignmentPage() {
             onOpenTeacherTab={handleOpenTeacherTab}
             onSaveTeacherGrade={handleSaveTeacherGrade}
             onEmailResult={handleEmailResult}
+            onEmailStudentAll={handleEmailStudentAll}
+            onEmailStudentTopic={handleEmailStudentTopic}
             emailDomain={user?.student_email_domain || ''}
           />
         )}
@@ -523,8 +530,6 @@ function GradingSection({
   gradeJob,
   gradeResults,
   gradeReport,
-  expandedResult,
-  setExpandedResult,
   gradingError,
   setGradingError,
   startingGrading,
@@ -537,6 +542,8 @@ function GradingSection({
   onOpenTeacherTab,
   onSaveTeacherGrade,
   onEmailResult,
+  onEmailStudentAll,
+  onEmailStudentTopic,
   emailDomain,
 }) {
   const navigate = useNavigate()
@@ -683,7 +690,10 @@ function GradingSection({
             {status === 'running' && (() => {
               const resTotal = rippleStats?.resources ?? 0
               const modTotal = rippleStats?.moderations ?? 0
-              const inPhase2 = isRnM && resTotal > 0 && gradeJob.graded >= resTotal
+              // Incremental re-run: job.total only counts pending items (starts at 0)
+              const isIncremental = (resTotal + modTotal) > 0 && gradeJob.total < (resTotal + modTotal)
+              const pct = gradeJob.total > 0 ? Math.round((gradeJob.graded / gradeJob.total) * 100) : 0
+              const inPhase2 = !isIncremental && isRnM && resTotal > 0 && gradeJob.graded >= resTotal
               const phaseGraded = inPhase2 ? gradeJob.graded - resTotal : gradeJob.graded
               const phaseTotal = inPhase2 ? modTotal : (resTotal || gradeJob.total)
               const phasePct = phaseTotal > 0 ? Math.round((phaseGraded / phaseTotal) * 100) : 0
@@ -691,7 +701,9 @@ function GradingSection({
                 <div>
                   <div className="flex items-center justify-between mb-1">
                     <div className="text-sm text-gray-700">
-                      {isRnM ? (
+                      {isIncremental ? (
+                        <span>Grading new submissions <span className="font-medium">{gradeJob.graded} / {gradeJob.total}</span></span>
+                      ) : isRnM ? (
                         inPhase2 ? (
                           <span>
                             <span className="text-emerald-600 font-medium">Resources done</span>
@@ -719,7 +731,7 @@ function GradingSection({
                   <div className="w-full bg-gray-200 rounded-full h-2">
                     <div
                       className="bg-indigo-500 h-2 rounded-full transition-all"
-                      style={{ width: `${phasePct}%` }}
+                      style={{ width: `${isIncremental ? pct : phasePct}%` }}
                     />
                   </div>
                 </div>
@@ -739,57 +751,49 @@ function GradingSection({
               </div>
             )}
 
+            {/* Complete — re-run for new data */}
+            {isComplete && (
+              <div className="flex items-center justify-between mb-4">
+                <span className="text-sm text-gray-500">
+                  Imported new CSV data? Re-run to grade ungraded submissions.
+                </span>
+                <button
+                  onClick={onStart}
+                  disabled={startingGrading || !hasResources}
+                  className={`px-3 py-1.5 text-sm rounded-lg shrink-0 ml-4 ${
+                    hasResources && !startingGrading
+                      ? 'bg-indigo-600 text-white hover:bg-indigo-700'
+                      : 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                  }`}
+                >
+                  {startingGrading ? 'Starting…' : 'Grade New Submissions'}
+                </button>
+              </div>
+            )}
+
             {/* Complete — results */}
             {isComplete && (
               <>
-                <div className="space-y-8">
-                    {resourceResults.length > 0 && (
-                      <div>
-                        <h3 className="text-base font-semibold text-gray-800 mb-4">
-                          Resource Grades
-                          <span className="ml-2 text-sm font-normal text-gray-400">({resourceResults.length})</span>
-                        </h3>
-                        <GradeResultsTable
-                          results={resourceResults}
-                          type="resource"
-                          expandedResult={expandedResult}
-                          setExpandedResult={setExpandedResult}
-                          onEmail={onEmailResult}
-                          emailDomain={emailDomain}
-                          onGradeNow={handleGradeNow}
-                        />
-                        {gradeReport && (
-                          <div className="mt-5 space-y-6">
-                            <CriterionDifficultyChart data={gradeReport.criterion_difficulty} />
-                            <TopicBreakdownTable data={gradeReport.topic_breakdown} />
-                          </div>
-                        )}
-                      </div>
-                    )}
-
-                    {isRnM && moderationResults.length > 0 && (
-                      <div className="border-t border-gray-200 pt-6">
-                        <h3 className="text-base font-semibold text-gray-800 mb-4">
-                          Moderation Grades
-                          <span className="ml-2 text-sm font-normal text-gray-400">({moderationResults.length})</span>
-                        </h3>
-                        <GradeResultsTable
-                          results={moderationResults}
-                          type="moderation"
-                          expandedResult={expandedResult}
-                          setExpandedResult={setExpandedResult}
-                          onEmail={onEmailResult}
-                          emailDomain={emailDomain}
-                          onGradeNow={handleGradeNow}
-                        />
-                        {gradeReport?.moderation_criterion_difficulty?.length > 0 && (
-                          <div className="mt-5">
-                            <CriterionDifficultyChart data={gradeReport.moderation_criterion_difficulty} />
-                          </div>
-                        )}
-                      </div>
+                <StudentGradeTable
+                  results={gradeResults}
+                  emailDomain={emailDomain}
+                  onEmail={onEmailResult}
+                  onEmailAll={onEmailStudentAll}
+                  onEmailTopic={onEmailStudentTopic}
+                  onGradeNow={handleGradeNow}
+                  assignment={assignment}
+                  resourceRubric={resourceRubric}
+                  moderationRubric={moderationRubric}
+                />
+                {gradeReport && (
+                  <div className="mt-6 space-y-6">
+                    <CriterionDifficultyChart data={gradeReport.criterion_difficulty} />
+                    <TopicBreakdownTable data={gradeReport.topic_breakdown} />
+                    {gradeReport.moderation_criterion_difficulty?.length > 0 && (
+                      <CriterionDifficultyChart data={gradeReport.moderation_criterion_difficulty} />
                     )}
                   </div>
+                )}
               </>
             )}
           </div>

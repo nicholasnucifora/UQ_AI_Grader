@@ -38,6 +38,7 @@ class GradeResultOut(BaseModel):
     primary_author_id: str = ""
     # For moderation results: the user who wrote the moderation comment.
     moderation_user_id: str | None
+    moderation_user_name: str | None = None
     status: str
     criterion_grades: list[CriterionGrade]
     overall_feedback: str | None = None

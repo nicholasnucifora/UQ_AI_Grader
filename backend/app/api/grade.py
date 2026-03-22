@@ -37,6 +37,7 @@ def _build_grade_result_out(r: GradeResult, db: Session) -> GradeResultOut:
         primary_author_name=resource.primary_author_name if resource else "",
         primary_author_id=resource.primary_author_id if resource else "",
         moderation_user_id=moderation.user_id if moderation else None,
+        moderation_user_name=moderation.user_name if moderation else None,
         moderation_comment=moderation.comment if moderation else None,
         resource_topics=resource.topics if resource else "",
         resource_status=resource.resource_status if resource else "",
@@ -185,13 +186,12 @@ def start_grading(
 
     existing = db.query(GradingJob).filter(GradingJob.assignment_id == assignment_id).first()
     if existing is not None:
-        if existing.is_preview:
-            # Keep the preview GradeResults — the grading logic will skip already-done
-            # resources via done_resource_ids, so preview submissions are preserved.
-            db.delete(existing)
-            db.commit()
-        else:
-            raise HTTPException(status_code=400, detail="Delete existing grading first")
+        if existing.status == "running" and not existing.is_preview:
+            raise HTTPException(status_code=400, detail="Cancel running grading before restarting")
+        # For preview jobs, complete jobs, cancelled, or error: keep GradeResults so the
+        # grading logic skips already-done resources via done_resource_ids.
+        db.delete(existing)
+        db.commit()
 
     resource_count = (
         db.query(RippleResource)
@@ -488,6 +488,128 @@ def _resolve_email_address(result: GradeResult, db: Session, override: str | Non
     return f"{student_id}@{settings.student_email_domain}"
 
 
+@router.get("/results/email-student/{student_id}")
+def get_student_grade_email(
+    class_id: int,
+    assignment_id: int,
+    student_id: str,
+    topic: str | None = Query(default=None),
+    to_email: str | None = Query(default=None),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return a single mailto email body covering all of a student's grade results.
+    Pass ?topic=... to filter to a specific topic."""
+    _require_class_teacher(class_id, current_user, db)
+    assignment = _get_assignment_or_404(class_id, assignment_id, db)
+
+    rubric_envelope = json.loads(assignment.rubric_json) if assignment.rubric_json else {}
+    resource_rubric = rubric_envelope.get("resource", rubric_envelope)
+    moderation_rubric = rubric_envelope.get("moderation") or resource_rubric
+
+    all_results = (
+        db.query(GradeResult)
+        .filter(GradeResult.assignment_id == assignment_id, GradeResult.status == "complete")
+        .all()
+    )
+
+    student_items: list[tuple] = []  # (GradeResult, RippleResource, RippleModeration|None)
+    for r in all_results:
+        res = db.get(RippleResource, r.ripple_resource_id)
+        if not res:
+            continue
+        if r.result_type == "resource" and res.primary_author_id == student_id:
+            student_items.append((r, res, None))
+        elif r.result_type == "moderation" and r.ripple_moderation_id:
+            mod = db.get(RippleModeration, r.ripple_moderation_id)
+            if mod and mod.user_id == student_id:
+                student_items.append((r, res, mod))
+
+    if topic:
+        student_items = [(r, res, mod) for r, res, mod in student_items if (res.topics or "").strip() == topic]
+
+    if not student_items:
+        raise HTTPException(status_code=404, detail="No completed results found for this student")
+
+    # Resolve email address
+    resolved_to = to_email
+    if not resolved_to:
+        if not settings.student_email_domain:
+            raise HTTPException(
+                status_code=400,
+                detail="STUDENT_EMAIL_DOMAIN is not configured — set it in .env or type the address manually",
+            )
+        resolved_to = f"{student_id}@{settings.student_email_domain}"
+
+    # Get student name from first resource result, falling back to moderation
+    student_name = ""
+    for r, res, mod in student_items:
+        if r.result_type == "resource" and res.primary_author_name:
+            student_name = res.primary_author_name
+            break
+        if r.result_type == "moderation" and mod and mod.user_name:
+            student_name = mod.user_name
+
+    # Precompute grade scale dicts once
+    resource_grade_scale = {
+        "enabled": assignment.grade_scale_enabled,
+        "max": assignment.grade_scale_max,
+        "rounding": assignment.grade_rounding or "none",
+        "decimal_places": assignment.grade_decimal_places or 2,
+    }
+    if assignment.separate_moderation_grade_scale and assignment.moderation_grade_scale_max:
+        moderation_grade_scale = {
+            "enabled": assignment.grade_scale_enabled,
+            "max": assignment.moderation_grade_scale_max,
+            "rounding": assignment.moderation_grade_rounding or "none",
+            "decimal_places": assignment.moderation_grade_decimal_places or 2,
+        }
+    else:
+        moderation_grade_scale = resource_grade_scale
+
+    # Group by topic
+    topic_map: dict = {}
+    for r, res, _ in student_items:
+        t = (res.topics or "").strip() or "No Topic"
+        if t not in topic_map:
+            topic_map[t] = {"resources": [], "moderations": []}
+        rubric = moderation_rubric if r.result_type == "moderation" else resource_rubric
+        grade_scale = moderation_grade_scale if r.result_type == "moderation" else resource_grade_scale
+        item = {
+            "result_type": r.result_type,
+            "resource_id": res.resource_id,
+            "criterion_grades": _parse_criterion_grades(r.criterion_grades),
+            "overall_feedback": r.overall_feedback,
+            "teacher_criterion_grades": _parse_criterion_grades(r.teacher_criterion_grades) if r.teacher_criterion_grades else None,
+            "teacher_overall_feedback": r.teacher_overall_feedback,
+            "rubric": rubric,
+            "grade_scale": grade_scale,
+        }
+        if r.result_type == "resource":
+            topic_map[t]["resources"].append(item)
+        else:
+            topic_map[t]["moderations"].append(item)
+
+    results_by_topic = [
+        {"topic": t, "resources": v["resources"], "moderations": v["moderations"]}
+        for t, v in sorted(topic_map.items())
+    ]
+
+    from app.services.email_service import build_student_summary_text
+    body = build_student_summary_text(
+        assignment_name=assignment.title,
+        student_name=student_name,
+        student_id=student_id,
+        results_by_topic=results_by_topic,
+    )
+
+    subject = f"AI Grade Summary: {assignment.title}"
+    if topic:
+        subject = f"AI Grade Summary ({topic}): {assignment.title}"
+
+    return {"to": resolved_to, "subject": subject, "body": body}
+
+
 @router.get("/results/{result_id}/email")
 def get_grade_email(
     class_id: int,
@@ -515,7 +637,7 @@ def get_grade_email(
 
     if result.result_type == "moderation" and moderation:
         student_id = moderation.user_id
-        student_name = moderation.user_id
+        student_name = moderation.user_name or moderation.user_id
     else:
         student_id = resource.primary_author_id if resource else ""
         student_name = resource.primary_author_name if resource else ""
@@ -525,6 +647,26 @@ def get_grade_email(
         rubric = rubric_envelope.get("moderation") or rubric_envelope.get("resource", rubric_envelope)
     else:
         rubric = rubric_envelope.get("resource", rubric_envelope)
+
+    # Build grade scale dict for the correct result type
+    if (
+        result.result_type == "moderation"
+        and assignment.separate_moderation_grade_scale
+        and assignment.moderation_grade_scale_max
+    ):
+        grade_scale = {
+            "enabled": assignment.grade_scale_enabled,
+            "max": assignment.moderation_grade_scale_max,
+            "rounding": assignment.moderation_grade_rounding or "none",
+            "decimal_places": assignment.moderation_grade_decimal_places or 2,
+        }
+    else:
+        grade_scale = {
+            "enabled": assignment.grade_scale_enabled,
+            "max": assignment.grade_scale_max,
+            "rounding": assignment.grade_rounding or "none",
+            "decimal_places": assignment.grade_decimal_places or 2,
+        }
 
     from app.services.email_service import build_grade_text
     body = build_grade_text(
@@ -537,6 +679,7 @@ def get_grade_email(
         rubric=rubric,
         teacher_criterion_grades=_parse_criterion_grades(result.teacher_criterion_grades) if result.teacher_criterion_grades else None,
         teacher_overall_feedback=result.teacher_overall_feedback,
+        grade_scale=grade_scale,
     )
 
     return {

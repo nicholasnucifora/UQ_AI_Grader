@@ -16,6 +16,20 @@ class AssignmentCreate(BaseModel):
     response_detail: Literal["concise", "standard", "detailed"] = "standard"
     use_topic_attachments: bool = False
     topic_attachment_instructions: str = ""
+    moderation_topic_attachment_instructions: str = ""
+    grade_scale_enabled: bool = False
+    grade_scale_max: float | None = None
+    grade_rounding: str = "none"
+    grade_decimal_places: int = 2
+    separate_moderation_grade_scale: bool = False
+    moderation_grade_scale_max: float | None = None
+    moderation_grade_rounding: str = "none"
+    moderation_grade_decimal_places: int = 2
+    combine_resource_grades: bool = False
+    combine_moderation_grades: bool = False
+    combine_resource_max_n: int | None = None
+    combine_moderation_max_n: int | None = None
+    combine_scope: str = "topic"
 
 
 class AssignmentUpdate(BaseModel):
@@ -34,6 +48,20 @@ class AssignmentUpdate(BaseModel):
     response_detail: Literal["concise", "standard", "detailed"] | None = None
     use_topic_attachments: bool | None = None
     topic_attachment_instructions: str | None = None
+    moderation_topic_attachment_instructions: str | None = None
+    grade_scale_enabled: bool | None = None
+    grade_scale_max: float | None = None
+    grade_rounding: str | None = None
+    grade_decimal_places: int | None = None
+    separate_moderation_grade_scale: bool | None = None
+    moderation_grade_scale_max: float | None = None
+    moderation_grade_rounding: str | None = None
+    moderation_grade_decimal_places: int | None = None
+    combine_resource_grades: bool | None = None
+    combine_moderation_grades: bool | None = None
+    combine_resource_max_n: int | None = None
+    combine_moderation_max_n: int | None = None
+    combine_scope: str | None = None
 
 
 class AssignmentOut(BaseModel):
@@ -54,6 +82,20 @@ class AssignmentOut(BaseModel):
     response_detail: str = "standard"
     use_topic_attachments: bool = False
     topic_attachment_instructions: str = ""
+    moderation_topic_attachment_instructions: str = ""
+    grade_scale_enabled: bool = False
+    grade_scale_max: float | None = None
+    grade_rounding: str = "none"
+    grade_decimal_places: int = 2
+    separate_moderation_grade_scale: bool = False
+    moderation_grade_scale_max: float | None = None
+    moderation_grade_rounding: str = "none"
+    moderation_grade_decimal_places: int = 2
+    combine_resource_grades: bool = False
+    combine_moderation_grades: bool = False
+    combine_resource_max_n: int | None = None
+    combine_moderation_max_n: int | None = None
+    combine_scope: str = "topic"
     created_by: str
     created_at: datetime
 

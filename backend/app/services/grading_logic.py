@@ -122,18 +122,20 @@ def grade_assignment(assignment_id: int, db: Session) -> None:
         .all()
     }
 
+    # Filter to only items that still need grading
+    pending_resource_ids = [rid for rid in resource_ids if rid not in done_resource_ids]
+    pending_moderation_ids = [mid for mid in moderation_ids if mid not in done_moderation_ids]
+
     job.status = "running"
-    job.total = len(resource_ids) + len(moderation_ids)
-    job.graded = len(done_resource_ids) + len(done_moderation_ids)
+    job.total = len(pending_resource_ids) + len(pending_moderation_ids)
+    job.graded = 0
     job.updated_at = datetime.now(timezone.utc)
     db.commit()
 
     # ------------------------------------------------------------------ #
     # Phase 1: grade resources                                             #
     # ------------------------------------------------------------------ #
-    for resource_id in resource_ids:
-        if resource_id in done_resource_ids:
-            continue
+    for resource_id in pending_resource_ids:
 
         job = db.query(GradingJob).filter(GradingJob.assignment_id == assignment_id).first()
         if job is None or job.status == "cancelled":
@@ -225,9 +227,7 @@ def grade_assignment(assignment_id: int, db: Session) -> None:
         "Phase 2: grading %d moderation(s) for assignment_id=%d",
         len(moderation_ids), assignment_id,
     )
-    for moderation_id in moderation_ids:
-        if moderation_id in done_moderation_ids:
-            continue
+    for moderation_id in pending_moderation_ids:
 
         job = db.query(GradingJob).filter(GradingJob.assignment_id == assignment_id).first()
         if job is None or job.status == "cancelled":

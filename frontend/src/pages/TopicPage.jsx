@@ -3,7 +3,7 @@ import { useParams, Link } from 'react-router-dom'
 import Layout from '../components/Layout'
 import { useAuth } from '../contexts/AuthContext'
 import { api } from '../api/client'
-import { GradeResultsTable, TeacherGradingPanel } from '../components/Marking'
+import { StudentGradeTable, TeacherGradingPanel } from '../components/Marking'
 
 export default function TopicPage() {
   const { id: classId, aid: assignmentId, topic: topicEncoded } = useParams()
@@ -18,7 +18,6 @@ export default function TopicPage() {
   const [uploading, setUploading] = useState(false)
   const [uploadError, setUploadError] = useState(null)
   const [activeTab, setActiveTab] = useState('ai')
-  const [expandedResult, setExpandedResult] = useState(null)
   const [saveError, setSaveError] = useState(null)
   const [startAtResultId, setStartAtResultId] = useState(null)
 
@@ -89,6 +88,14 @@ export default function TopicPage() {
 
   async function handleEmailResult(resultId, toEmail) {
     return api.openGradeEmail(classId, assignmentId, resultId, toEmail)
+  }
+
+  async function handleEmailStudentAll(studentId, toEmail) {
+    return api.openStudentGradeEmail(classId, assignmentId, studentId, { toEmail })
+  }
+
+  async function handleEmailStudentTopic(studentId, topicName, toEmail) {
+    return api.openStudentGradeEmail(classId, assignmentId, studentId, { toEmail, topic: topicName })
   }
 
   async function handleUploadAttachment(e) {
@@ -238,36 +245,18 @@ export default function TopicPage() {
               )}
 
               {activeTab === 'ai' && (
-                <div className="space-y-8">
-                  {resourceResults.length > 0 && (
-                    <div>
-                      {isRnM && <h3 className="text-base font-semibold text-gray-800 mb-4">Resources <span className="text-sm font-normal text-gray-400">({resourceResults.length})</span></h3>}
-                      <GradeResultsTable
-                        results={resourceResults}
-                        type="resource"
-                        expandedResult={expandedResult}
-                        setExpandedResult={setExpandedResult}
-                        onEmail={handleEmailResult}
-                        emailDomain={user?.student_email_domain || ''}
-                        onGradeNow={isTeacher ? handleGradeNow : undefined}
-                      />
-                    </div>
-                  )}
-                  {isRnM && moderationResults.length > 0 && (
-                    <div className="border-t border-gray-200 pt-6">
-                      <h3 className="text-base font-semibold text-gray-800 mb-4">Moderations <span className="text-sm font-normal text-gray-400">({moderationResults.length})</span></h3>
-                      <GradeResultsTable
-                        results={moderationResults}
-                        type="moderation"
-                        expandedResult={expandedResult}
-                        setExpandedResult={setExpandedResult}
-                        onEmail={handleEmailResult}
-                        emailDomain={user?.student_email_domain || ''}
-                        onGradeNow={isTeacher ? handleGradeNow : undefined}
-                      />
-                    </div>
-                  )}
-                </div>
+                <StudentGradeTable
+                  results={topicResults}
+                  emailDomain={user?.student_email_domain || ''}
+                  onEmail={handleEmailResult}
+                  onEmailAll={handleEmailStudentAll}
+                  onEmailTopic={handleEmailStudentTopic}
+                  onGradeNow={isTeacher ? handleGradeNow : undefined}
+                  isSingleTopic
+                  assignment={assignment}
+                  resourceRubric={resourceRubric}
+                  moderationRubric={moderationRubric}
+                />
               )}
 
               {activeTab === 'teacher' && isTeacher && (

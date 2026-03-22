@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -33,8 +33,30 @@ class Assignment(Base):
     # Topic attachment settings
     use_topic_attachments: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     topic_attachment_instructions: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    moderation_topic_attachment_instructions: Mapped[str] = mapped_column(Text, nullable=False, default="")
     # Rubric stored as JSON envelope {"resource": {...}, "moderation": {...}} (migration 3f2f0ece9f62)
     rubric_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Grade scaling — convert raw rubric score to a custom grade range (migration c1d2e3f4a5b6)
+    grade_scale_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    grade_scale_max: Mapped[float | None] = mapped_column(Float, nullable=True)
+    grade_rounding: Mapped[str] = mapped_column(String(16), nullable=False, default="none")
+    # "none" | "round" | "round_up" | "round_down" | "half" (nearest 0.5)
+    grade_decimal_places: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
+    # Optional separate grade scale for moderation results (migration e3f4a5b6c7d8)
+    separate_moderation_grade_scale: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    moderation_grade_scale_max: Mapped[float | None] = mapped_column(Float, nullable=True)
+    moderation_grade_rounding: Mapped[str] = mapped_column(String(16), nullable=False, default="none")
+    moderation_grade_decimal_places: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
+    # Combined overall grade per student (average across all submissions of that type)
+    combine_resource_grades: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    combine_moderation_grades: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # Max submissions counted per student (null = no limit, use simple average)
+    # When set to N: best N scores taken, divided by N (missing = 0 contribution)
+    combine_resource_max_n: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    combine_moderation_max_n: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Whether combined grade is computed per-topic or across the whole assignment
+    combine_scope: Mapped[str] = mapped_column(String(16), nullable=False, default="topic")
+    # "topic" | "assignment"
     created_by: Mapped[str] = mapped_column(
         ForeignKey("users.user_id"), nullable=False
     )

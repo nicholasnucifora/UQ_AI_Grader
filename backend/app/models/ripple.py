@@ -43,6 +43,7 @@ class RippleModeration(Base):
     )
     resource_id: Mapped[str] = mapped_column(String(256), nullable=False)
     user_id: Mapped[str] = mapped_column(String(256), nullable=False, default="")
+    user_name: Mapped[str] = mapped_column(String(256), nullable=False, default="")
     role: Mapped[str] = mapped_column(String(128), nullable=False, default="")
     comment: Mapped[str] = mapped_column(Text, nullable=False, default="")
     rubric_scores: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)

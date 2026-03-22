@@ -91,7 +91,7 @@ const DASHED = '1px dashed #d1d5db'
 // RubricGroup — one CSS grid per set of criteria sharing the same level columns
 // ---------------------------------------------------------------------------
 
-function RubricGroup({ group, onUpdate, onDelete, readOnly, onAddRow, onAddColumn, onAddBoth, onDeleteColumn }) {
+function RubricGroup({ group, onUpdate, onDelete, readOnly, onAddRow, onAddColumn, onAddBoth, onDeleteColumn, onUpdateLevelHeader }) {
   const { headerLevels, criteria } = group
   const [hoveredId, setHoveredId] = useState(null)
   const [hoveredLevelTitle, setHoveredLevelTitle] = useState(null)
@@ -129,8 +129,22 @@ function RubricGroup({ group, onUpdate, onDelete, readOnly, onAddRow, onAddColum
           onMouseEnter={() => setHoveredLevelTitle(level.title + colIdx)}
           onMouseLeave={() => setHoveredLevelTitle(null)}
         >
-          <div className="text-sm font-semibold text-gray-800">{level.title}</div>
-          <div className="text-xs text-gray-400">{level.points} pts</div>
+          <InlineText
+            value={level.title}
+            onChange={(v) => onUpdateLevelHeader(colIdx, { title: v })}
+            readOnly={readOnly}
+            className="text-sm font-semibold text-gray-800 w-full"
+            placeholder="Level name"
+          />
+          <div className="flex items-center gap-1 text-xs text-gray-400">
+            <InlineNumber
+              value={level.points}
+              onChange={(v) => onUpdateLevelHeader(colIdx, { points: v })}
+              readOnly={readOnly}
+              className="text-xs"
+            />
+            <span>pts</span>
+          </div>
           {!readOnly && (
             <button
               type="button"
@@ -278,13 +292,7 @@ export default function RubricEditor({ rubric, onChange, readOnly = false }) {
 
   const groups = useMemo(() => groupCriteria(rubric?.criteria ?? []), [rubric])
 
-  if (!rubric) {
-    return (
-      <div className="text-center py-8 text-gray-400 text-sm border-2 border-dashed border-gray-200 rounded-xl">
-        No rubric yet — upload a document above or build one manually below.
-      </div>
-    )
-  }
+  if (!rubric) return null
 
   function updateCriterion(updated) {
     onChange({
@@ -339,6 +347,22 @@ export default function RubricEditor({ rubric, onChange, readOnly = false }) {
         const sorted = [...c.levels].sort((a, b) => b.points - a.points)
         const levelToRemove = sorted[colIdx]
         return { ...c, levels: c.levels.filter((l) => l.id !== levelToRemove.id) }
+      }),
+    })
+  }
+
+  function updateLevelInGroup(group, colIdx, updates) {
+    const criteriaIds = new Set(group.criteria.map((c) => c.id))
+    onChange({
+      ...rubric,
+      criteria: rubric.criteria.map((c) => {
+        if (!criteriaIds.has(c.id)) return c
+        const sorted = [...c.levels].sort((a, b) => b.points - a.points)
+        const levelToUpdate = sorted[colIdx]
+        return {
+          ...c,
+          levels: c.levels.map((l) => l.id === levelToUpdate.id ? { ...l, ...updates } : l),
+        }
       }),
     })
   }
@@ -411,6 +435,7 @@ export default function RubricEditor({ rubric, onChange, readOnly = false }) {
             onAddColumn={() => addColumnToGroup(group)}
             onAddBoth={() => addBothToGroup(group)}
             onDeleteColumn={(title) => deleteColumnFromGroup(group, title)}
+            onUpdateLevelHeader={(colIdx, updates) => updateLevelInGroup(group, colIdx, updates)}
           />
         ))}
       </div>

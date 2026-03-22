@@ -119,6 +119,18 @@ export const api = {
       `mailto:${encodeURIComponent(to)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`
     )
   },
+  openStudentGradeEmail: async (classId, assignmentId, studentId, { toEmail, topic } = {}) => {
+    const params = new URLSearchParams()
+    if (toEmail) params.set('to_email', toEmail)
+    if (topic) params.set('topic', topic)
+    const qs = params.toString() ? `?${params}` : ''
+    const { to, subject, body } = await request(
+      `/classes/${classId}/assignments/${assignmentId}/grade/results/email-student/${encodeURIComponent(studentId)}${qs}`
+    )
+    window.open(
+      `mailto:${encodeURIComponent(to)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`
+    )
+  },
 
   // Topics
   getTopics: (classId, assignmentId) =>

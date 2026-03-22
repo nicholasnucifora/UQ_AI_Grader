@@ -146,7 +146,7 @@ async def import_ripple_csv(
             role = row.get("Role") or ""
             comment = (row.get("Comment") or "").strip()
             resource_id = row.get("Resource ID") or ""
-            user_id = row.get("User ID") or ""
+            user_id = row.get("User Course ID") or row.get("User ID") or ""
 
             # Skip multi-topic rows
             if "," in topic_ids:
@@ -167,11 +167,16 @@ async def import_ripple_csv(
 
             existing_pairs.add((resource_id, user_id))
             rubric_scores = {col: row.get(col) or "" for col in rubric_cols}
+            user_name = " ".join(filter(None, [
+                (row.get("First Name") or "").strip(),
+                (row.get("Last Name") or "").strip(),
+            ]))
             records.append(
                 RippleModeration(
                     assignment_id=assignment.id,
                     resource_id=resource_id,
                     user_id=user_id,
+                    user_name=user_name,
                     role=role,
                     comment=comment,
                     rubric_scores=rubric_scores,
