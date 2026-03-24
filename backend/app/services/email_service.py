@@ -80,8 +80,7 @@ def _append_result_lines(lines: list, item: dict) -> None:
 
     grade_scale = item.get("grade_scale")
     if result_type == "moderation":
-        moderation_id = item.get("moderation_id") or resource_id
-        label_str = f"Moderation {moderation_id} of Resource {resource_id}"
+        label_str = f"Moderation of Resource {resource_id}"
     else:
         label_str = f"Resource {resource_id}"
     lines.append(f"\u2500\u2500 {label_str} \u2500\u2500")
@@ -96,10 +95,11 @@ def _append_result_lines(lines: list, item: dict) -> None:
                 max_pts += max((lv.get("points", 0) for lv in lvs), default=0)
     pct = round(total_pts / max_pts * 100) if max_pts > 0 else 0
 
-    lines.append(f"AI Score:  {total_pts:.1f} / {max_pts:.1f} pts  ({pct}%)")
+    score_line = f"AI Score:  {total_pts:.1f} / {max_pts:.1f} pts  ({pct}%)"
     scaled = _apply_grade_scale(total_pts, max_pts, grade_scale)
     if scaled:
-        lines.append(f"Grade Output:  {scaled}")
+        score_line += f"  \u2192  Grade: {scaled}"
+    lines.append(score_line)
     lines.append("")
 
     grade_map: dict = {}
@@ -111,6 +111,8 @@ def _append_result_lines(lines: list, item: dict) -> None:
 
     criteria = (rubric or {}).get("criteria", [])
     if criteria:
+        numeric_weights = [c.get("weight_percentage") for c in criteria if c.get("weight_percentage") not in (None, "")]
+        show_weights = len(numeric_weights) > 0 and (max(numeric_weights) - min(numeric_weights)) > 1
         for c in criteria:
             grade = grade_map.get(c["id"]) or grade_map.get(c["name"], {})
             name = c.get("name", "")
@@ -121,7 +123,7 @@ def _append_result_lines(lines: list, item: dict) -> None:
             c_max = max((lv.get("points", 0) for lv in c_levels), default=0) if c_levels else None
 
             header = name.upper()
-            if weight != "":
+            if show_weights and weight != "":
                 header += f"  ({weight}%)"
             lines.append(header)
 
@@ -256,9 +258,10 @@ def _type_summary_lines(
             return []
         pct = round(total_pts / total_max * 100)
         scaled = _apply_grade_scale(total_pts, total_max, scale)
-        line = f"{label}:  {total_pts:.1f} / {total_max:.1f} pts  ({pct}%)"
         if scaled:
-            line += f"  \u2192  Grade: {scaled}"
+            line = f"{label}:  {scaled}"
+        else:
+            line = f"{label}:  {total_pts:.1f} / {total_max:.1f} pts  ({pct}%)"
         return [line]
 
     # --- combine=True ---
@@ -317,29 +320,36 @@ def _topic_combined_grade_str(
     """Return a single-line grade string for one topic, or None if not applicable."""
     parts: list[tuple[float, float]] = []  # (value, max)
 
-    if combine_resource_grades and res_items:
-        rs = _compute_combined_stats(res_items, combine_resource_max_n, res_scale)
-        if rs:
-            val = rs["scaled_value"] if rs["scaled_value"] is not None else rs["combined_raw"]
-            mx = rs["scale_max"] if rs["scale_max"] is not None else rs["max_per"]
-            parts.append((val, mx))
+    def _grade_pair(items: list[dict], combine: bool, max_n: int | None, scale: dict | None) -> tuple[float, float] | None:
+        if not items:
+            return None
+        if combine:
+            stats = _compute_combined_stats(items, max_n, scale)
+            if not stats:
+                return None
+            val = stats["scaled_value"] if stats["scaled_value"] is not None else stats["combined_raw"]
+            mx = stats["scale_max"] if stats["scale_max"] is not None else stats["max_per"]
+            return (val, mx)
+        else:
+            pairs = [_compute_item_totals(i) for i in items]
+            total_pts = sum(pts for pts, _ in pairs)
+            total_max = sum(mx for _, mx in pairs)
+            if total_max <= 0:
+                return None
+            numeric = _apply_grade_scale_numeric(total_pts, total_max, scale)
+            return numeric if numeric else (total_pts, total_max)
 
-    if is_rnm and combine_moderation_grades and mod_items:
-        ms = _compute_combined_stats(mod_items, combine_moderation_max_n, mod_scale)
-        if ms:
-            val = ms["scaled_value"] if ms["scaled_value"] is not None else ms["combined_raw"]
-            mx = ms["scale_max"] if ms["scale_max"] is not None else ms["max_per"]
-            parts.append((val, mx))
+    res_pair = _grade_pair(res_items, combine_resource_grades, combine_resource_max_n, res_scale)
+    if res_pair:
+        parts.append(res_pair)
+
+    if is_rnm:
+        mod_pair = _grade_pair(mod_items, combine_moderation_grades, combine_moderation_max_n, mod_scale)
+        if mod_pair:
+            parts.append(mod_pair)
 
     if not parts:
-        # Fall back to raw pts
-        all_items = res_items + mod_items
-        total_pts = sum(_compute_item_totals(i)[0] for i in all_items)
-        total_max = sum(_compute_item_totals(i)[1] for i in all_items)
-        if total_max <= 0:
-            return None
-        pct = round(total_pts / total_max * 100)
-        return f"{total_pts:.1f} / {total_max:.1f} pts  ({pct}%)"
+        return None
 
     total_val = sum(v for v, _ in parts)
     total_max = sum(m for _, m in parts)
@@ -489,17 +499,18 @@ def build_grade_text(
         student_line = f"{student_name} ({student_id})"
 
     scaled = _apply_grade_scale(total_pts, max_pts, grade_scale)
+    score_line = f"Total Score:  {total_pts:.1f} / {max_pts:.1f} pts  ({pct}%)"
+    if scaled:
+        score_line += f"  \u2192  Grade: {scaled}"
     header_lines = [
         f"AI GRADE RESULTS \u2014 {assignment_name.upper()}",
         "",
         "",
         f"Student:      {student_line}",
         f"Type:         {result_label}",
-        f"Total Score:  {total_pts:.1f} / {max_pts:.1f} pts  ({pct}%)",
+        score_line,
+        "", "", "CRITERION BREAKDOWN", "",
     ]
-    if scaled:
-        header_lines.append(f"Grade Output: {scaled}")
-    header_lines += ["", "", "CRITERION BREAKDOWN", ""]
     lines = header_lines
 
     # Build grade lookup by criterion_id and criterion_name
@@ -512,6 +523,8 @@ def build_grade_text(
 
     criteria = (rubric or {}).get("criteria", [])
     if criteria:
+        numeric_weights = [c.get("weight_percentage") for c in criteria if c.get("weight_percentage") not in (None, "")]
+        show_weights = len(numeric_weights) > 0 and (max(numeric_weights) - min(numeric_weights)) > 1
         for c in criteria:
             grade = grade_map.get(c["id"]) or grade_map.get(c["name"], {})
             name = c.get("name", "")
@@ -523,7 +536,7 @@ def build_grade_text(
             c_max = max((lv.get("points", 0) for lv in c_levels), default=0) if c_levels else None
 
             header = name.upper()
-            if weight != "":
+            if show_weights and weight != "":
                 header += f"  ({weight}%)"
 
             grade_line = ""

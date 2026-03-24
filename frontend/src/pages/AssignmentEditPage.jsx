@@ -7,6 +7,8 @@ import {
   FeedbackFormatPicker,
   LinkToggle,
   RubricBlock,
+  GradeScaleFields,
+  CombineTypeSection,
   TopicAttachmentManager,
   MARKING_MODES,
   AI_MODELS,
@@ -39,6 +41,19 @@ export default function AssignmentEditPage() {
   const [useTopicAttachments, setUseTopicAttachments] = useState(false)
   const [topicAttachmentInstructions, setTopicAttachmentInstructions] = useState('')
   const [topicInstructionOverrides, setTopicInstructionOverrides] = useState({})
+  // Grade output
+  const [customizeGradeOutput, setCustomizeGradeOutput] = useState(false)
+  const [sameGradeOutput, setSameGradeOutput] = useState(true)
+  const [gradeScaleMax, setGradeScaleMax] = useState('')
+  const [gradeRounding, setGradeRounding] = useState('none')
+  const [gradeDecimalPlaces, setGradeDecimalPlaces] = useState(2)
+  const [combineResourceGrades, setCombineResourceGrades] = useState(false)
+  const [combineResourceMaxN, setCombineResourceMaxN] = useState('')
+  const [moderationGradeScaleMax, setModerationGradeScaleMax] = useState('')
+  const [moderationGradeRounding, setModerationGradeRounding] = useState('none')
+  const [moderationGradeDecimalPlaces, setModerationGradeDecimalPlaces] = useState(2)
+  const [combineModerationGrades, setCombineModerationGrades] = useState(false)
+  const [combineModerationMaxN, setCombineModerationMaxN] = useState('')
 
   const inputCls = 'w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500'
 
@@ -67,6 +82,21 @@ export default function AssignmentEditPage() {
         setUseTopicAttachments(assignment.use_topic_attachments ?? false)
         setTopicAttachmentInstructions(assignment.topic_attachment_instructions ?? '')
         setTopicInstructionOverrides(assignment.topic_instruction_overrides ?? {})
+        // Grade output
+        const hasGradeConfig = assignment.grade_scale_enabled ||
+          assignment.combine_resource_grades || assignment.combine_moderation_grades
+        setCustomizeGradeOutput(hasGradeConfig)
+        setSameGradeOutput(!(assignment.separate_moderation_grade_scale ?? false))
+        setGradeScaleMax(assignment.grade_scale_max != null ? String(assignment.grade_scale_max) : '')
+        setGradeRounding(assignment.grade_rounding ?? 'none')
+        setGradeDecimalPlaces(assignment.grade_decimal_places ?? 2)
+        setCombineResourceGrades(assignment.combine_resource_grades ?? false)
+        setCombineResourceMaxN(assignment.combine_resource_max_n != null ? String(assignment.combine_resource_max_n) : '')
+        setModerationGradeScaleMax(assignment.moderation_grade_scale_max != null ? String(assignment.moderation_grade_scale_max) : '')
+        setModerationGradeRounding(assignment.moderation_grade_rounding ?? 'none')
+        setModerationGradeDecimalPlaces(assignment.moderation_grade_decimal_places ?? 2)
+        setCombineModerationGrades(assignment.combine_moderation_grades ?? false)
+        setCombineModerationMaxN(assignment.combine_moderation_max_n != null ? String(assignment.combine_moderation_max_n) : '')
 
         if (rubricData) {
           setRubric(rubricData.rubric)
@@ -103,6 +133,7 @@ export default function AssignmentEditPage() {
     setError('')
 
     try {
+      const scaledMax = gradeScaleMax !== '' ? parseFloat(gradeScaleMax) : null
       await api.updateAssignment(classId, aid, {
         title: title.trim(),
         description: description.trim(),
@@ -118,6 +149,18 @@ export default function AssignmentEditPage() {
         use_topic_attachments: useTopicAttachments,
         topic_attachment_instructions: topicAttachmentInstructions.trim(),
         topic_instruction_overrides: topicInstructionOverrides,
+        grade_scale_enabled: scaledMax !== null,
+        grade_scale_max: scaledMax,
+        grade_rounding: gradeRounding,
+        grade_decimal_places: gradeDecimalPlaces,
+        combine_resource_grades: combineResourceGrades,
+        combine_resource_max_n: combineResourceGrades && combineResourceMaxN !== '' ? parseInt(combineResourceMaxN, 10) : null,
+        separate_moderation_grade_scale: isRnM && !sameGradeOutput,
+        moderation_grade_scale_max: isRnM && !sameGradeOutput && moderationGradeScaleMax !== '' ? parseFloat(moderationGradeScaleMax) : null,
+        moderation_grade_rounding: moderationGradeRounding,
+        moderation_grade_decimal_places: moderationGradeDecimalPlaces,
+        combine_moderation_grades: isRnM && combineModerationGrades,
+        combine_moderation_max_n: isRnM && combineModerationGrades && combineModerationMaxN !== '' ? parseInt(combineModerationMaxN, 10) : null,
       })
 
       if (rubric) {
@@ -342,6 +385,84 @@ export default function AssignmentEditPage() {
             <ButtonGroup label="Marking mode" options={MARKING_MODES} value={markingMode} onChange={setMarkingMode} />
             <ButtonGroup label="AI Model" options={AI_MODELS} value={aiModel} onChange={setAiModel} />
             <FeedbackFormatPicker value={feedbackFormat} onChange={setFeedbackFormat} />
+          </section>
+
+          {/* ── Grade Output ── */}
+          <section className="bg-white border border-gray-200 rounded-xl p-5 space-y-4">
+            <h2 className="font-semibold text-gray-800">Grade Output</h2>
+
+            <label className="flex items-center gap-2 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                className="w-4 h-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                checked={customizeGradeOutput}
+                onChange={(e) => setCustomizeGradeOutput(e.target.checked)}
+              />
+              <span className="text-sm text-gray-700">Customize grade output from rubric</span>
+            </label>
+
+            {customizeGradeOutput && (
+              <div className="space-y-4">
+                {isRnM && (
+                  <label className="flex items-center gap-2 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      className="w-4 h-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                      checked={sameGradeOutput}
+                      onChange={(e) => setSameGradeOutput(e.target.checked)}
+                    />
+                    <span className="text-sm text-gray-700">Same grade output for resources and moderations</span>
+                  </label>
+                )}
+
+                {(!isRnM || sameGradeOutput) ? (
+                  <div className="space-y-3">
+                    <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Overall</p>
+                    <GradeScaleFields
+                      max={gradeScaleMax} onMax={setGradeScaleMax}
+                      rounding={gradeRounding} onRounding={setGradeRounding}
+                      dp={gradeDecimalPlaces} onDp={setGradeDecimalPlaces}
+                    />
+                    <CombineTypeSection
+                      label={isRnM ? 'Combine grades' : 'Combine resource grades'}
+                      enabled={combineResourceGrades}
+                      onToggle={(v) => { setCombineResourceGrades(v); if (isRnM) setCombineModerationGrades(v) }}
+                      maxN={combineResourceMaxN}
+                      onMaxN={(v) => { setCombineResourceMaxN(v); if (isRnM) setCombineModerationMaxN(v) }}
+                    />
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-2 gap-6">
+                    <div className="space-y-3">
+                      <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Resources</p>
+                      <GradeScaleFields
+                        max={gradeScaleMax} onMax={setGradeScaleMax}
+                        rounding={gradeRounding} onRounding={setGradeRounding}
+                        dp={gradeDecimalPlaces} onDp={setGradeDecimalPlaces}
+                      />
+                      <CombineTypeSection
+                        label="Combine resource grades"
+                        enabled={combineResourceGrades} onToggle={setCombineResourceGrades}
+                        maxN={combineResourceMaxN} onMaxN={setCombineResourceMaxN}
+                      />
+                    </div>
+                    <div className="space-y-3">
+                      <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Moderations</p>
+                      <GradeScaleFields
+                        max={moderationGradeScaleMax} onMax={setModerationGradeScaleMax}
+                        rounding={moderationGradeRounding} onRounding={setModerationGradeRounding}
+                        dp={moderationGradeDecimalPlaces} onDp={setModerationGradeDecimalPlaces}
+                      />
+                      <CombineTypeSection
+                        label="Combine moderation grades"
+                        enabled={combineModerationGrades} onToggle={setCombineModerationGrades}
+                        maxN={combineModerationMaxN} onMaxN={setCombineModerationMaxN}
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
           </section>
 
           <div className="flex gap-3">
