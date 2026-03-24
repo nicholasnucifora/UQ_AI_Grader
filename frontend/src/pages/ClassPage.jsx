@@ -123,7 +123,6 @@ function AssignmentsTab({ classId, assignments, isTeacher, onNew }) {
             >
               <div className="flex items-center gap-3">
                 <span className="font-medium text-gray-800">{a.title}</span>
-                <StrictnessBadge strictness={a.strictness} />
               </div>
               {a.description && (
                 <p className="text-sm text-gray-500 mt-1 line-clamp-2">{a.description}</p>
@@ -174,15 +173,3 @@ function MembersTab({ members, isTeacher, onAdd }) {
   )
 }
 
-function StrictnessBadge({ strictness }) {
-  const colors = {
-    lenient: 'bg-green-100 text-green-700',
-    standard: 'bg-yellow-100 text-yellow-700',
-    strict: 'bg-red-100 text-red-700',
-  }
-  return (
-    <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${colors[strictness] ?? 'bg-gray-100 text-gray-600'}`}>
-      {strictness}
-    </span>
-  )
-}

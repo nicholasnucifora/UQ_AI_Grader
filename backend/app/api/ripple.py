@@ -8,7 +8,7 @@ from app.core.database import get_db
 from app.models.assignment import Assignment
 from app.models.ripple import RippleModeration, RippleResource
 from app.models.user import User
-from app.schemas.ripple import RippleImportResult, RippleStats
+from app.schemas.ripple import RippleImportResult, RippleStats, SkippedRow
 from app.services.auth_service import get_current_user
 
 router = APIRouter(
@@ -86,6 +86,7 @@ async def import_ripple_csv(
         section_cols = [f for f in fieldnames if f.startswith("Section ")]
         records = []
         skipped = 0
+        skipped_details: list[SkippedRow] = []
         for row in rows:
             topics = row.get("Topics") or ""
             status = row.get("Resource Status") or ""
@@ -95,18 +96,22 @@ async def import_ripple_csv(
             # Skip multi-topic rows
             if "," in topics:
                 skipped += 1
+                skipped_details.append(SkippedRow(resource_id=resource_id, reason="multi-topic", detail=topics))
                 continue
             # Skip rows with no submitted content
             if not sections:
                 skipped += 1
+                skipped_details.append(SkippedRow(resource_id=resource_id, reason="no content"))
                 continue
             # Skip statuses that aren't meaningful for grading
             if status not in ALLOWED_RESOURCE_STATUSES:
                 skipped += 1
+                skipped_details.append(SkippedRow(resource_id=resource_id, reason="invalid status", detail=status))
                 continue
             # Skip duplicates already in DB
             if resource_id in existing_ids:
                 skipped += 1
+                skipped_details.append(SkippedRow(resource_id=resource_id, reason="duplicate"))
                 continue
 
             existing_ids.add(resource_id)
@@ -127,7 +132,7 @@ async def import_ripple_csv(
             )
         db.add_all(records)
         db.commit()
-        return RippleImportResult(type="resource", imported=len(records), skipped=skipped)
+        return RippleImportResult(type="resource", imported=len(records), skipped=skipped, skipped_details=skipped_details)
 
     else:  # moderation
         # Load existing (resource_id, user_id) pairs to avoid duplicates
@@ -141,6 +146,7 @@ async def import_ripple_csv(
         rubric_cols = [f for f in fieldnames if f.startswith("Rubric ")]
         records = []
         skipped = 0
+        skipped_details: list[SkippedRow] = []
         for row in rows:
             topic_ids = row.get("Topic IDs") or ""
             role = row.get("Role") or ""
@@ -151,18 +157,22 @@ async def import_ripple_csv(
             # Skip multi-topic rows
             if "," in topic_ids:
                 skipped += 1
+                skipped_details.append(SkippedRow(resource_id=resource_id, reason="multi-topic", detail=topic_ids))
                 continue
             # Skip non-moderator rows (e.g. student peer reviews)
             if role.lower() != "moderator":
                 skipped += 1
+                skipped_details.append(SkippedRow(resource_id=resource_id, reason=f"not moderator (role: {role})", detail=user_id))
                 continue
             # Skip rows with no comment
             if not comment:
                 skipped += 1
+                skipped_details.append(SkippedRow(resource_id=resource_id, reason="empty comment", detail=user_id))
                 continue
             # Skip duplicates already in DB
             if (resource_id, user_id) in existing_pairs:
                 skipped += 1
+                skipped_details.append(SkippedRow(resource_id=resource_id, reason="duplicate", detail=user_id))
                 continue
 
             existing_pairs.add((resource_id, user_id))
@@ -184,7 +194,7 @@ async def import_ripple_csv(
             )
         db.add_all(records)
         db.commit()
-        return RippleImportResult(type="moderation", imported=len(records), skipped=skipped)
+        return RippleImportResult(type="moderation", imported=len(records), skipped=skipped, skipped_details=skipped_details)
 
 
 @router.delete("", status_code=204)

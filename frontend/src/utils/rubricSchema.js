@@ -12,6 +12,7 @@ export const RubricCriterionSchema = z.object({
   name: z.string().min(1),
   weight_percentage: z.number().min(0).max(100),
   levels: z.array(RubricLevelSchema).min(1),
+  ai_hint: z.string().optional(),
 })
 
 export const RubricSchemaZ = z.object({

@@ -17,6 +17,7 @@ class GradingJobOut(BaseModel):
     assignment_id: int
     status: str
     is_preview: bool = False
+    preview_type: str | None = None
     preview_sample_size: int = 3
     total: int
     graded: int

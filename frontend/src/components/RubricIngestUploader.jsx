@@ -42,7 +42,7 @@ export default function RubricIngestUploader({ onRubricExtracted, onError }) {
   return (
     <div className="space-y-2">
       <label className="block text-sm font-medium text-gray-700">
-        Upload Rubric Document (optional)
+        Upload Rubric Document <span className="text-red-500">*</span>
       </label>
 
       <div
@@ -80,7 +80,7 @@ export default function RubricIngestUploader({ onRubricExtracted, onError }) {
 
       {errorMsg && (
         <p className="text-sm text-red-600">
-          {errorMsg} — you can still build the rubric manually below.
+          {errorMsg}
         </p>
       )}
     </div>

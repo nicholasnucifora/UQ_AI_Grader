@@ -87,10 +87,12 @@ export const api = {
     request(`/classes/${classId}/assignments/${assignmentId}/ripple/stats`),
 
   // AI Grading
-  startPreviewGrading: (classId, assignmentId) =>
-    request(`/classes/${classId}/assignments/${assignmentId}/grade/preview`, { method: 'POST' }),
-  extendPreviewForSpread: (classId, assignmentId) =>
-    request(`/classes/${classId}/assignments/${assignmentId}/grade/preview/extend`, { method: 'POST' }),
+  startPreviewGrading: (classId, assignmentId, type = 'resource') =>
+    request(`/classes/${classId}/assignments/${assignmentId}/grade/preview?type=${type}`, { method: 'POST' }),
+  extendPreviewForSpread: (classId, assignmentId, type) =>
+    request(`/classes/${classId}/assignments/${assignmentId}/grade/preview/extend${type ? `?type=${type}` : ''}`, { method: 'POST' }),
+  clearPreview: (classId, assignmentId) =>
+    request(`/classes/${classId}/assignments/${assignmentId}/grade/preview`, { method: 'DELETE' }),
   startGrading: (classId, assignmentId) =>
     request(`/classes/${classId}/assignments/${assignmentId}/grade/start`, { method: 'POST' }),
   cancelGrading: (classId, assignmentId) =>
@@ -127,9 +129,16 @@ export const api = {
     const { to, subject, body } = await request(
       `/classes/${classId}/assignments/${assignmentId}/grade/results/email-student/${encodeURIComponent(studentId)}${qs}`
     )
-    window.open(
-      `mailto:${encodeURIComponent(to)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`
-    )
+    const fullUrl = `mailto:${encodeURIComponent(to)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`
+    // mailto: URIs > ~30 000 chars often silently fail on Windows (shell CreateProcess limit ~32 767).
+    // Fall back to clipboard so the body isn't lost.
+    if (fullUrl.length > 30000) {
+      try { await navigator.clipboard.writeText(body) } catch {}
+      window.open(`mailto:${encodeURIComponent(to)}?subject=${encodeURIComponent(subject)}`)
+      return { clipboardFallback: true }
+    }
+    window.open(fullUrl)
+    return { clipboardFallback: false }
   },
 
   // Topics

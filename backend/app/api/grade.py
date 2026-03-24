@@ -109,36 +109,71 @@ def start_preview_grading(
     class_id: int,
     assignment_id: int,
     background_tasks: BackgroundTasks,
+    type: str = Query("resource"),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Start a preview grading job — grades only a small sample (3 resources).
+    """Start a preview grading job for resources or moderations (3 samples).
     Runs as a BackgroundTask in the API process so the worker is never involved.
-    Any existing preview job is replaced automatically."""
+    Only clears results of the specified type, preserving the other type's results."""
+    if type not in ("resource", "moderation"):
+        raise HTTPException(status_code=400, detail="type must be 'resource' or 'moderation'")
+
     _require_class_teacher(class_id, current_user, db)
     assignment = _get_assignment_or_404(class_id, assignment_id, db)
+
+    if type == "moderation":
+        if assignment.assignment_type != "resources_and_moderations":
+            raise HTTPException(status_code=400, detail="Moderation preview is only available for Resources & Moderations assignments")
+        moderation_count = (
+            db.query(RippleModeration)
+            .filter(RippleModeration.assignment_id == assignment_id)
+            .count()
+        )
+        if moderation_count == 0:
+            raise HTTPException(status_code=400, detail="No moderations imported yet")
+
+    if not assignment.rubric_json:
+        raise HTTPException(status_code=400, detail="No rubric defined for this assignment")
+
+    if type == "resource":
+        resource_count = (
+            db.query(RippleResource)
+            .filter(RippleResource.assignment_id == assignment_id)
+            .count()
+        )
+        if resource_count == 0:
+            raise HTTPException(status_code=400, detail="No resources imported yet")
 
     existing = db.query(GradingJob).filter(GradingJob.assignment_id == assignment_id).first()
     if existing is not None:
         if not existing.is_preview:
             raise HTTPException(status_code=400, detail="A full grading job already exists — delete it before running a preview")
-        db.query(GradeResult).filter(GradeResult.assignment_id == assignment_id).delete()
+        if existing.status == "running":
+            raise HTTPException(status_code=400, detail="A preview is already running — cancel it first")
+        # Clear only the results for the type being re-run; keep the other type's results.
+        # Delete + recreate the job row so any lingering background task (cancelled mid-AI-call)
+        # will get None when it next fetches by job ID and will stop cleanly.
+        db.query(GradeResult).filter(
+            GradeResult.assignment_id == assignment_id,
+            GradeResult.result_type == type,
+        ).delete()
         db.delete(existing)
         db.commit()
-
-    resource_count = (
-        db.query(RippleResource)
-        .filter(RippleResource.assignment_id == assignment_id)
-        .count()
-    )
-    if resource_count == 0:
-        raise HTTPException(status_code=400, detail="No resources imported yet")
-    if not assignment.rubric_json:
-        raise HTTPException(status_code=400, detail="No rubric defined for this assignment")
+    else:
+        # No existing preview job — clear any stale results from previous full grading runs
+        db.query(GradeResult).filter(GradeResult.assignment_id == assignment_id).delete()
+        db.commit()
 
     # Status starts as "running" — the worker only picks up "queued" jobs, so it
     # will never process this. The background task below handles it directly.
-    job = GradingJob(assignment_id=assignment_id, status="running", is_preview=True, preview_sample_size=3)
+    job = GradingJob(
+        assignment_id=assignment_id,
+        status="running",
+        is_preview=True,
+        preview_type=type,
+        preview_sample_size=3,
+    )
     db.add(job)
     db.commit()
     db.refresh(job)
@@ -147,16 +182,46 @@ def start_preview_grading(
     return job
 
 
+@router.delete("/preview", status_code=204)
+def clear_preview(
+    class_id: int,
+    assignment_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Delete all preview results and the preview job, returning to a clean state."""
+    _require_class_teacher(class_id, current_user, db)
+    _get_assignment_or_404(class_id, assignment_id, db)
+
+    job = db.query(GradingJob).filter(GradingJob.assignment_id == assignment_id).first()
+    if job is None:
+        return Response(status_code=204)
+    if not job.is_preview:
+        raise HTTPException(status_code=400, detail="Cannot clear a full grading job via this endpoint")
+    if job.status == "running":
+        raise HTTPException(status_code=400, detail="Cancel the running preview before clearing")
+
+    db.query(GradeResult).filter(GradeResult.assignment_id == assignment_id).delete()
+    db.delete(job)
+    db.commit()
+    return Response(status_code=204)
+
+
 @router.post("/preview/extend", response_model=GradingJobOut)
 def extend_preview_for_spread(
     class_id: int,
     assignment_id: int,
     background_tasks: BackgroundTasks,
+    type: str = Query(None),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """Add more preview samples targeting grade spread (up to 15 total).
-    Requires an existing complete preview job."""
+    Requires an existing complete preview job. Pass type=resource|moderation to
+    switch which type is extended; defaults to the job's current preview_type."""
+    if type is not None and type not in ("resource", "moderation"):
+        raise HTTPException(status_code=400, detail="type must be 'resource' or 'moderation'")
+
     _require_class_teacher(class_id, current_user, db)
     _get_assignment_or_404(class_id, assignment_id, db)
 
@@ -166,6 +231,8 @@ def extend_preview_for_spread(
     if job.status not in ("complete", "cancelled"):
         raise HTTPException(status_code=400, detail="Preview must be complete before extending")
 
+    if type is not None:
+        job.preview_type = type
     job.status = "running"
     db.commit()
     db.refresh(job)
@@ -569,7 +636,7 @@ def get_student_grade_email(
 
     # Group by topic
     topic_map: dict = {}
-    for r, res, _ in student_items:
+    for r, res, mod in student_items:
         t = (res.topics or "").strip() or "No Topic"
         if t not in topic_map:
             topic_map[t] = {"resources": [], "moderations": []}
@@ -585,6 +652,8 @@ def get_student_grade_email(
             "rubric": rubric,
             "grade_scale": grade_scale,
         }
+        if r.result_type == "moderation" and mod:
+            item["moderation_id"] = mod.resource_id
         if r.result_type == "resource":
             topic_map[t]["resources"].append(item)
         else:
@@ -601,6 +670,11 @@ def get_student_grade_email(
         student_name=student_name,
         student_id=student_id,
         results_by_topic=results_by_topic,
+        assignment_type=assignment.assignment_type,
+        combine_resource_grades=bool(assignment.combine_resource_grades),
+        combine_resource_max_n=assignment.combine_resource_max_n,
+        combine_moderation_grades=bool(assignment.combine_moderation_grades),
+        combine_moderation_max_n=assignment.combine_moderation_max_n,
     )
 
     subject = f"AI Grade Summary: {assignment.title}"

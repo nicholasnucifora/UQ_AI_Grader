@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, JSON, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -28,12 +28,16 @@ class Assignment(Base):
     marking_mode: Mapped[str] = mapped_column(String(32), nullable=False, default="teacher_supervised_ai")
     # AI model tier: "haiku" | "sonnet" | "opus" — resolved to actual model ID via settings
     ai_model: Mapped[str] = mapped_column(String(64), nullable=False, default="haiku")
-    # Feedback detail level: "concise" | "standard" | "detailed"
+    # Feedback detail level: "concise" | "standard" | "detailed" (kept for legacy, unused)
     response_detail: Mapped[str] = mapped_column(String(16), nullable=False, default="standard")
+    # Free-text feedback format instruction sent to the AI
+    feedback_format: Mapped[str | None] = mapped_column(Text, nullable=True, default="")
     # Topic attachment settings
     use_topic_attachments: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     topic_attachment_instructions: Mapped[str] = mapped_column(Text, nullable=False, default="")
     moderation_topic_attachment_instructions: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    # Per-topic instruction overrides: {topic_name: instruction_string} — overrides global topic_attachment_instructions
+    topic_instruction_overrides: Mapped[dict] = mapped_column(JSON, nullable=True, default=dict)
     # Rubric stored as JSON envelope {"resource": {...}, "moderation": {...}} (migration 3f2f0ece9f62)
     rubric_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Grade scaling — convert raw rubric score to a custom grade range (migration c1d2e3f4a5b6)

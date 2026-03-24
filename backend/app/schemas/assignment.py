@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 
 class AssignmentCreate(BaseModel):
@@ -14,6 +14,7 @@ class AssignmentCreate(BaseModel):
     marking_mode: Literal["teacher_supervised_ai", "teacher_marking"] = "teacher_supervised_ai"
     ai_model: str = "haiku"
     response_detail: Literal["concise", "standard", "detailed"] = "standard"
+    feedback_format: str = ""
     use_topic_attachments: bool = False
     topic_attachment_instructions: str = ""
     moderation_topic_attachment_instructions: str = ""
@@ -30,6 +31,7 @@ class AssignmentCreate(BaseModel):
     combine_resource_max_n: int | None = None
     combine_moderation_max_n: int | None = None
     combine_scope: str = "topic"
+    topic_instruction_overrides: dict = {}
 
 
 class AssignmentUpdate(BaseModel):
@@ -46,6 +48,7 @@ class AssignmentUpdate(BaseModel):
     marking_mode: Literal["teacher_supervised_ai", "teacher_marking"] | None = None
     ai_model: str | None = None
     response_detail: Literal["concise", "standard", "detailed"] | None = None
+    feedback_format: str | None = None
     use_topic_attachments: bool | None = None
     topic_attachment_instructions: str | None = None
     moderation_topic_attachment_instructions: str | None = None
@@ -62,6 +65,7 @@ class AssignmentUpdate(BaseModel):
     combine_resource_max_n: int | None = None
     combine_moderation_max_n: int | None = None
     combine_scope: str | None = None
+    topic_instruction_overrides: dict | None = None
 
 
 class AssignmentOut(BaseModel):
@@ -80,6 +84,7 @@ class AssignmentOut(BaseModel):
     marking_mode: str = "teacher_supervised_ai"
     ai_model: str = "haiku"
     response_detail: str = "standard"
+    feedback_format: str = ""
     use_topic_attachments: bool = False
     topic_attachment_instructions: str = ""
     moderation_topic_attachment_instructions: str = ""
@@ -96,7 +101,13 @@ class AssignmentOut(BaseModel):
     combine_resource_max_n: int | None = None
     combine_moderation_max_n: int | None = None
     combine_scope: str = "topic"
+    topic_instruction_overrides: dict = {}
     created_by: str
     created_at: datetime
+
+    @field_validator("topic_instruction_overrides", mode="before")
+    @classmethod
+    def coerce_none_to_empty_dict(cls, v):
+        return v if v is not None else {}
 
     model_config = {"from_attributes": True}

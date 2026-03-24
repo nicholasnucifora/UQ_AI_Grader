@@ -19,6 +19,8 @@ export default function AssignmentPage() {
   const [rippleStats, setRippleStats] = useState(null)
   const [rippleImporting, setRippleImporting] = useState(false)
   const [rippleMessage, setRippleMessage] = useState(null)
+  const [rippleSkippedDetails, setRippleSkippedDetails] = useState([])
+  const [showSkippedDetails, setShowSkippedDetails] = useState(false)
   const [clearingAiGrades, setClearingAiGrades] = useState(false)
   const [gradeJob, setGradeJob] = useState(null)
   const [gradeResults, setGradeResults] = useState(null)
@@ -134,6 +136,8 @@ export default function AssignmentPage() {
     e.target.value = ''
     setRippleImporting(true)
     setRippleMessage(null)
+    setRippleSkippedDetails([])
+    setShowSkippedDetails(false)
     const formData = new FormData()
     formData.append('file', file)
     try {
@@ -142,9 +146,10 @@ export default function AssignmentPage() {
         setRippleMessage({ ok: false, text: 'This assignment only accepts resources. To use moderation data, edit the assignment and change the type to "Resources & Moderations".' })
       } else {
         const label = result.type === 'resource' ? 'Resource' : 'Moderation'
-        const skipNote = result.skipped > 0 ? ` (${result.skipped} skipped — duplicates/empty/multi-topic/invalid status)` : ''
-        setRippleMessage({ ok: true, text: `${label} export — ${result.imported} new records added${skipNote}` })
+        setRippleMessage({ ok: true, text: `${label} export — ${result.imported} new records added`, skipped: result.skipped })
+        setRippleSkippedDetails(result.skipped_details || [])
         api.getRippleStats(classId, assignmentId).then(setRippleStats).catch(() => {})
+        api.getTopics(classId, assignmentId).then(setTopics).catch(() => {})
       }
     } catch (err) {
       setRippleMessage({ ok: false, text: err.message })
@@ -274,12 +279,6 @@ export default function AssignmentPage() {
     setShowSubmit(false)
   }
 
-  const strictnessColors = {
-    lenient: 'bg-green-100 text-green-700',
-    standard: 'bg-yellow-100 text-yellow-700',
-    strict: 'bg-red-100 text-red-700',
-  }
-
   return (
     <Layout>
       <div className="max-w-screen-2xl mx-auto">
@@ -296,11 +295,6 @@ export default function AssignmentPage() {
           <div>
             <div className="flex items-center gap-3 mb-1">
               <h1 className="text-2xl font-bold text-gray-900">{assignment.title}</h1>
-              <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${
-                strictnessColors[assignment.strictness] ?? 'bg-gray-100 text-gray-600'
-              }`}>
-                {assignment.strictness}
-              </span>
             </div>
             {assignment.description && (
               <p className="text-gray-600 mt-1">{assignment.description}</p>
@@ -339,9 +333,30 @@ export default function AssignmentPage() {
                   </p>
                 )}
                 {rippleMessage && (
-                  <p className={`text-sm mt-1 ${rippleMessage.ok ? 'text-green-600' : 'text-red-600'}`}>
-                    {rippleMessage.ok ? '✓ ' : ''}{rippleMessage.text}
-                  </p>
+                  <div className="mt-1">
+                    <p className={`text-sm ${rippleMessage.ok ? 'text-green-600' : 'text-red-600'}`}>
+                      {rippleMessage.ok ? '✓ ' : ''}{rippleMessage.text}
+                      {rippleMessage.ok && rippleMessage.skipped > 0 && (
+                        <button
+                          onClick={() => setShowSkippedDetails(v => !v)}
+                          className="ml-1 underline decoration-dotted cursor-pointer"
+                        >
+                          ({rippleMessage.skipped} skipped {showSkippedDetails ? '▲' : '▼'})
+                        </button>
+                      )}
+                    </p>
+                    {showSkippedDetails && rippleSkippedDetails.length > 0 && (
+                      <ul className="mt-1 text-xs text-gray-500 border border-gray-200 rounded p-2 space-y-0.5 max-h-48 overflow-y-auto">
+                        {rippleSkippedDetails.map((row, i) => (
+                          <li key={i}>
+                            <span className="font-mono text-gray-700">{row.resource_id}</span>
+                            {' — '}{row.reason}
+                            {row.detail ? <span className="text-gray-400"> ({row.detail})</span> : null}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
                 )}
               </div>
               <div className="flex items-center gap-2 shrink-0">
@@ -423,14 +438,17 @@ export default function AssignmentPage() {
           <section className="bg-white border border-gray-200 rounded-xl p-5 mb-6">
             <h2 className="font-semibold text-gray-800 mb-4">Topics</h2>
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
-              {topics.map(({ topic, resource_count }) => (
+              {topics.map(({ topic, resource_count, moderation_count }) => (
                 <Link
                   key={topic}
                   to={`/classes/${classId}/assignments/${assignmentId}/topics/${encodeURIComponent(topic)}`}
                   className="flex flex-col gap-1 p-3 border border-gray-200 rounded-lg hover:border-indigo-300 hover:bg-indigo-50 transition-colors group"
                 >
                   <span className="text-sm font-medium text-gray-800 group-hover:text-indigo-700 leading-snug">{topic}</span>
-                  <span className="text-xs text-gray-400">{resource_count} resource{resource_count !== 1 ? 's' : ''}</span>
+                  <span className="text-xs text-gray-400">
+                    {resource_count} resource{resource_count !== 1 ? 's' : ''}
+                    {moderation_count > 0 && `, ${moderation_count} moderation${moderation_count !== 1 ? 's' : ''}`}
+                  </span>
                 </Link>
               ))}
             </div>
@@ -758,15 +776,15 @@ function GradingSection({
                   Imported new CSV data? Re-run to grade ungraded submissions.
                 </span>
                 <button
-                  onClick={onStart}
-                  disabled={startingGrading || !hasResources}
+                  onClick={() => navigate(`/classes/${classId}/assignments/${assignmentId}/grading-setup?mode=new_submissions`)}
+                  disabled={!hasResources}
                   className={`px-3 py-1.5 text-sm rounded-lg shrink-0 ml-4 ${
-                    hasResources && !startingGrading
+                    hasResources
                       ? 'bg-indigo-600 text-white hover:bg-indigo-700'
                       : 'bg-gray-100 text-gray-400 cursor-not-allowed'
                   }`}
                 >
-                  {startingGrading ? 'Starting…' : 'Grade New Submissions'}
+                  Grade New Submissions
                 </button>
               </div>
             )}

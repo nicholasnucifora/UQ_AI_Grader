@@ -326,6 +326,8 @@ export function StudentGradeTable({ results, emailDomain, onEmail, onEmailAll, o
   const maxPossibleModeration = computeMaxPoints(moderationRubric ?? resourceRubric)
   const [emailingAll, setEmailingAll] = useState({})
   const [emailingTopic, setEmailingTopic] = useState({})
+  const [emailError, setEmailError] = useState(null)      // red — actual failure
+  const [emailInfo, setEmailInfo] = useState(null)        // blue — clipboard fallback notice
 
   const students = useMemo(() => {
     const map = new Map()
@@ -376,16 +378,30 @@ export function StudentGradeTable({ results, emailDomain, onEmail, onEmailAll, o
 
   async function handleEmailAll(studentId) {
     if (!onEmailAll) return
+    setEmailError(null)
+    setEmailInfo(null)
     setEmailingAll((p) => ({ ...p, [studentId]: true }))
-    try { await onEmailAll(studentId, resolvedEmail(studentId)) } catch {}
+    try {
+      const result = await onEmailAll(studentId, resolvedEmail(studentId))
+      if (result?.clipboardFallback) {
+        setEmailInfo('Email body copied to clipboard — paste it into the email that just opened.')
+      }
+    } catch (err) { setEmailError(err?.message || 'Failed to open email') }
     setEmailingAll((p) => ({ ...p, [studentId]: false }))
   }
 
   async function handleEmailTopic(studentId, topic) {
     if (!onEmailTopic) return
+    setEmailError(null)
+    setEmailInfo(null)
     const key = `${studentId}:${topic}`
     setEmailingTopic((p) => ({ ...p, [key]: true }))
-    try { await onEmailTopic(studentId, topic, resolvedEmail(studentId)) } catch {}
+    try {
+      const result = await onEmailTopic(studentId, topic, resolvedEmail(studentId))
+      if (result?.clipboardFallback) {
+        setEmailInfo('Email body copied to clipboard — paste it into the email that just opened.')
+      }
+    } catch (err) { setEmailError(err?.message || 'Failed to open email') }
     setEmailingTopic((p) => ({ ...p, [key]: false }))
   }
 
@@ -403,6 +419,19 @@ export function StudentGradeTable({ results, emailDomain, onEmail, onEmailAll, o
   }
 
   return (
+    <div>
+      {emailError && (
+        <div className="flex items-start justify-between bg-red-50 border border-red-200 rounded-lg px-4 py-2.5 mb-3 text-sm text-red-700">
+          <span>{emailError}</span>
+          <button onClick={() => setEmailError(null)} className="ml-3 text-red-400 hover:text-red-600 shrink-0">✕</button>
+        </div>
+      )}
+      {emailInfo && (
+        <div className="flex items-start justify-between bg-blue-50 border border-blue-200 rounded-lg px-4 py-2.5 mb-3 text-sm text-blue-700">
+          <span>{emailInfo}</span>
+          <button onClick={() => setEmailInfo(null)} className="ml-3 text-blue-400 hover:text-blue-600 shrink-0">✕</button>
+        </div>
+      )}
     <div className="rounded-xl border border-gray-200 overflow-hidden">
       {students.map((student, si) => {
         const isExpanded = expandedStudentId === student.id
@@ -525,6 +554,7 @@ export function StudentGradeTable({ results, emailDomain, onEmail, onEmailAll, o
           </div>
         )
       })}
+    </div>
     </div>
   )
 }

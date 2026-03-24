@@ -1,28 +1,25 @@
 import { useEffect, useState } from 'react'
-import { useParams, Link, useNavigate } from 'react-router-dom'
+import { useParams, Link, useNavigate, useSearchParams } from 'react-router-dom'
 import Layout from '../components/Layout'
-import RubricIngestUploader from '../components/RubricIngestUploader'
-import RubricEditor from '../components/RubricEditor'
 import { ReadOnlyMarkingGrid, HTML_PROSE } from '../components/Marking'
 import { api } from '../api/client'
-
-const AI_MODELS = [
-  { value: 'opus', label: 'Claude Opus', description: 'Smart, Expensive' },
-  { value: 'sonnet', label: 'Claude Sonnet', description: 'Recommended' },
-  { value: 'haiku', label: 'Claude Haiku', description: 'Fast, Cheap' },
-]
-
-const RESPONSE_DETAILS = [
-  { value: 'concise', label: 'Concise', description: 'Short, targeted feedback — one or two sentences per criterion' },
-  { value: 'standard', label: 'Standard', description: 'Balanced feedback covering each criterion clearly' },
-  { value: 'detailed', label: 'Detailed', description: 'Thorough feedback with specific evidence and improvement suggestions' },
-]
+import {
+  ButtonGroup,
+  FeedbackFormatPicker,
+  LinkToggle,
+  RubricBlock,
+  TopicAttachmentManager,
+  AI_MODELS,
+} from '../components/AssignmentShared'
 
 // ---------------------------------------------------------------------------
 // Preview result — full-width layout matching the teacher marking panel
 // ---------------------------------------------------------------------------
 
 function PreviewResultCard({ result, rubric, index }) {
+  const [originalOpen, setOriginalOpen] = useState(false)
+  const isModeration = result.result_type === 'moderation'
+
   return (
     <div className="border border-gray-200 rounded-xl bg-white overflow-hidden">
       {/* Header */}
@@ -30,7 +27,9 @@ function PreviewResultCard({ result, rubric, index }) {
         <div>
           <span className="text-xs text-gray-400 mr-2">Sample {index + 1}</span>
           <span className="text-sm font-semibold text-gray-800">
-            {result.primary_author_name || result.resource_id}
+            {isModeration
+              ? (result.moderation_user_name || result.moderation_user_id || 'Unknown moderator')
+              : (result.primary_author_name || result.resource_id)}
           </span>
           {result.resource_topics && (
             <span className="ml-2 text-xs text-gray-400">{result.resource_topics}</span>
@@ -48,19 +47,54 @@ function PreviewResultCard({ result, rubric, index }) {
           <p className="text-sm text-red-500">{result.error_message ?? 'Grading failed.'}</p>
         ) : (
           <>
-            {/* Student submission content */}
-            <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
-              <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">Student Submission</p>
-              {result.resource_sections?.length > 0 ? (
-                <div className="space-y-3">
-                  {result.resource_sections.map((section, i) => (
-                    <div key={i} className={HTML_PROSE} dangerouslySetInnerHTML={{ __html: section }} />
-                  ))}
+            {isModeration ? (
+              <>
+                {/* Moderation comment */}
+                <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
+                  <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">Moderation Comment</p>
+                  {result.moderation_comment ? (
+                    <p className="text-sm text-gray-700 leading-relaxed whitespace-pre-wrap">{result.moderation_comment}</p>
+                  ) : (
+                    <p className="text-sm text-gray-400 italic">No comment available</p>
+                  )}
                 </div>
-              ) : (
-                <p className="text-sm text-gray-400 italic">No content available</p>
-              )}
-            </div>
+                {/* Collapsible original resource */}
+                {result.resource_sections?.length > 0 && (
+                  <div className="border border-gray-200 rounded-lg overflow-hidden">
+                    <button
+                      onClick={() => setOriginalOpen((o) => !o)}
+                      className="w-full flex items-center justify-between px-4 py-2.5 bg-gray-50 hover:bg-gray-100 transition-colors text-left"
+                    >
+                      <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
+                        Original resource — {result.primary_author_name || 'author'}
+                      </span>
+                      <span className="text-gray-400 text-xs ml-2">{originalOpen ? '▲ hide' : '▼ show'}</span>
+                    </button>
+                    {originalOpen && (
+                      <div className="p-4 space-y-3 border-t border-gray-200">
+                        {result.resource_sections.map((section, i) => (
+                          <div key={i} className={HTML_PROSE} dangerouslySetInnerHTML={{ __html: section }} />
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </>
+            ) : (
+              /* Resource: show student submission content */
+              <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
+                <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">Student Submission</p>
+                {result.resource_sections?.length > 0 ? (
+                  <div className="space-y-3">
+                    {result.resource_sections.map((section, i) => (
+                      <div key={i} className={HTML_PROSE} dangerouslySetInnerHTML={{ __html: section }} />
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-sm text-gray-400 italic">No content available</p>
+                )}
+              </div>
+            )}
 
             {/* AI marking grid */}
             {rubric?.criteria ? (
@@ -105,6 +139,8 @@ function SharedBanner() {
 export default function GradingSetupPage() {
   const { id: classId, aid: assignmentId } = useParams()
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
+  const isNewSubmissionsMode = searchParams.get('mode') === 'new_submissions'
 
   const [cls, setCls] = useState(null)
   const [assignment, setAssignment] = useState(null)
@@ -116,32 +152,37 @@ export default function GradingSetupPage() {
   const [classDescription, setClassDescription] = useState('')
   const [assignmentDescription, setAssignmentDescription] = useState('')
   const [markingMode, setMarkingMode] = useState('teacher_supervised_ai')
-  const [markIdentically, setMarkIdentically] = useState(true)
-  const [strictness, setStrictness] = useState('standard')
+  const [sameRubric, setSameRubric] = useState(true)
+  const [sameNotes, setSameNotes] = useState(true)
   const [additionalNotes, setAdditionalNotes] = useState('')
-  const [moderationStrictness, setModerationStrictness] = useState('standard')
   const [moderationNotes, setModerationNotes] = useState('')
   const [aiModel, setAiModel] = useState('haiku')
-  const [responseDetail, setResponseDetail] = useState('standard')
+  const [feedbackFormat, setFeedbackFormat] = useState('')
   const [useTopicAttachments, setUseTopicAttachments] = useState(false)
   const [topicAttachmentInstructions, setTopicAttachmentInstructions] = useState('')
+  const [topicInstructionOverrides, setTopicInstructionOverrides] = useState({})
   const [rubric, setRubric] = useState(null)
   const [moderationRubric, setModerationRubric] = useState(null)
+
+  // New submissions mode state
+  const [topicsWithoutAttachments, setTopicsWithoutAttachments] = useState([])
+  const [showMissingAttachmentsConfirm, setShowMissingAttachmentsConfirm] = useState(false)
+  const [startingNewSubmissions, setStartingNewSubmissions] = useState(false)
 
   // Preview grading state
   const [previewJob, setPreviewJob] = useState(null)
   const [previewResults, setPreviewResults] = useState(null)
   const [selectedGrade, setSelectedGrade] = useState(null)
   const [previewIdx, setPreviewIdx] = useState(0)
+  const [previewTab, setPreviewTab] = useState('resource') // 'resource' | 'moderation'
   const [running, setRunning] = useState(false)
   const [extending, setExtending] = useState(false)
+  const [clearing, setClearing] = useState(false)
   const [accepting, setAccepting] = useState(false)
   const [error, setError] = useState(null)
 
   useEffect(() => {
     let cancelled = false
-    // Reset all data state immediately so stale values from a previous assignment
-    // are never shown while the new fetch is in flight.
     setTotalResources(null)
     setPreviewJob(null)
     setPreviewResults(null)
@@ -172,17 +213,15 @@ export default function GradingSetupPage() {
           setAssignment(a)
           setAssignmentDescription(a.description ?? '')
           setMarkingMode(a.marking_mode ?? 'teacher_supervised_ai')
-          setMarkIdentically(
-            (a.same_rubric_for_moderation ?? true) && (a.same_ai_options_for_moderation ?? true)
-          )
-          setStrictness(a.strictness ?? 'standard')
+          setSameRubric(a.same_rubric_for_moderation ?? true)
+          setSameNotes(a.same_ai_options_for_moderation ?? true)
           setAdditionalNotes(a.additional_notes ?? '')
-          setModerationStrictness(a.moderation_strictness ?? 'standard')
           setModerationNotes(a.moderation_additional_notes ?? '')
           setAiModel(a.ai_model ?? 'haiku')
-          setResponseDetail(a.response_detail ?? 'standard')
+          setFeedbackFormat(a.feedback_format ?? '')
           setUseTopicAttachments(a.use_topic_attachments ?? false)
           setTopicAttachmentInstructions(a.topic_attachment_instructions ?? '')
+          setTopicInstructionOverrides(a.topic_instruction_overrides ?? {})
         }
 
         if (rubricData) {
@@ -193,9 +232,16 @@ export default function GradingSetupPage() {
 
         if (job && job.is_preview) {
           setPreviewJob(job)
+          if (job.preview_type) setPreviewTab(job.preview_type)
           if (job.status === 'complete') {
             const results = await api.getGradeResults(classId, assignmentId).catch(() => [])
-            if (!cancelled) setPreviewResults(results)
+            if (!cancelled) {
+              setPreviewResults(results)
+              // If there are both resource and moderation results, show whichever tab has results
+              const hasRes = results.some((r) => r.result_type === 'resource')
+              const hasMod = results.some((r) => r.result_type === 'moderation')
+              if (hasMod && !hasRes) setPreviewTab('moderation')
+            }
           }
         }
       } finally {
@@ -220,12 +266,26 @@ export default function GradingSetupPage() {
       const job = await api.getGradeStatus(classId, assignmentId).catch(() => null)
       if (!job) return
       setPreviewJob(job)
-      if (job.status === 'complete') {
+      if (job.graded > 0 || job.status === 'complete') {
         api.getGradeResults(classId, assignmentId).then(setPreviewResults).catch(() => {})
       }
     }, 3000)
     return () => clearInterval(interval)
   }, [previewJob?.status, classId, assignmentId])
+
+  // Load topics to detect ones without attachments (new submissions mode + topic attachments enabled)
+  useEffect(() => {
+    if (!isNewSubmissionsMode || !useTopicAttachments || !classId || !assignmentId) return
+    api.getTopics(classId, assignmentId)
+      .then((topics) => {
+        setTopicsWithoutAttachments(topics.filter((t) => t.attachment_count === 0).map((t) => t.topic))
+      })
+      .catch(() => {})
+  }, [isNewSubmissionsMode, useTopicAttachments, classId, assignmentId])
+
+  const isRnM = assignment?.assignment_type === 'resources_and_moderations'
+  const rubricLinked = !isRnM || sameRubric
+  const notesLinked = !isRnM || sameNotes
 
   async function saveAllSettings() {
     await Promise.all([
@@ -233,35 +293,36 @@ export default function GradingSetupPage() {
       api.updateAssignment(classId, assignmentId, {
         description: assignmentDescription.trim(),
         marking_mode: markingMode,
-        same_rubric_for_moderation: identical,
-        same_ai_options_for_moderation: identical,
-        strictness,
+        same_rubric_for_moderation: rubricLinked,
+        same_ai_options_for_moderation: notesLinked,
         additional_notes: additionalNotes.trim(),
-        moderation_strictness: !identical ? moderationStrictness : null,
-        moderation_additional_notes: !identical ? moderationNotes.trim() : null,
+        moderation_additional_notes: !notesLinked ? moderationNotes.trim() : null,
         ai_model: aiModel,
-        response_detail: responseDetail,
+        feedback_format: feedbackFormat.trim(),
         use_topic_attachments: useTopicAttachments,
         topic_attachment_instructions: topicAttachmentInstructions.trim(),
+        topic_instruction_overrides: topicInstructionOverrides,
       }),
       rubric
         ? (rubricExists
-            ? api.updateRubric(classId, assignmentId, { rubric, moderation_rubric: !identical ? moderationRubric : null })
-            : api.saveRubric(classId, assignmentId, { rubric, moderation_rubric: !identical ? moderationRubric : null }).then(() => setRubricExists(true)))
+            ? api.updateRubric(classId, assignmentId, { rubric, moderation_rubric: !rubricLinked ? moderationRubric : null })
+            : api.saveRubric(classId, assignmentId, { rubric, moderation_rubric: !rubricLinked ? moderationRubric : null }).then(() => setRubricExists(true)))
         : Promise.resolve(),
     ])
   }
 
-  async function handleRunPreview() {
+  async function handleRunPreview(type) {
     setError(null)
     setRunning(true)
-    setPreviewResults(null)
     setPreviewIdx(0)
     setSelectedGrade(null)
+    // Clear only the results for this type locally so the other type stays visible
+    setPreviewResults((prev) => prev ? prev.filter((r) => r.result_type !== type) : null)
     try {
       await saveAllSettings()
-      const job = await api.startPreviewGrading(classId, assignmentId)
+      const job = await api.startPreviewGrading(classId, assignmentId, type)
       setPreviewJob(job)
+      setPreviewTab(type)
     } catch (err) {
       setError(err.message)
     } finally {
@@ -269,18 +330,34 @@ export default function GradingSetupPage() {
     }
   }
 
-  async function handleFindSpread() {
+  async function handleExtendPreview(type) {
     setError(null)
     setExtending(true)
     try {
-      const job = await api.extendPreviewForSpread(classId, assignmentId)
-      // Zero out totals locally — the background task hasn't updated them yet.
-      // This forces the progress bar to show "Starting…" instead of 100%.
+      const job = await api.extendPreviewForSpread(classId, assignmentId, type)
       setPreviewJob({ ...job, total: 0, graded: 0 })
+      setPreviewTab(type)
     } catch (err) {
       setError(err.message)
     } finally {
       setExtending(false)
+    }
+  }
+
+  async function handleClearAllPreviews() {
+    setError(null)
+    setClearing(true)
+    try {
+      await api.clearPreview(classId, assignmentId)
+      setPreviewJob(null)
+      setPreviewResults(null)
+      setSelectedGrade(null)
+      setPreviewIdx(0)
+      setPreviewTab('resource')
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setClearing(false)
     }
   }
 
@@ -289,13 +366,39 @@ export default function GradingSetupPage() {
     setAccepting(true)
     try {
       await saveAllSettings()
-      // startGrading auto-deletes any existing preview job on the backend
       await api.startGrading(classId, assignmentId)
       navigate(`/classes/${classId}/assignments/${assignmentId}`)
     } catch (err) {
       setError(err.message)
       setAccepting(false)
     }
+  }
+
+  async function doGradeNewSubmissions() {
+    setError(null)
+    setStartingNewSubmissions(true)
+    try {
+      await saveAllSettings()
+      await api.startGrading(classId, assignmentId)
+      navigate(`/classes/${classId}/assignments/${assignmentId}`)
+    } catch (err) {
+      setError(err.message)
+      setStartingNewSubmissions(false)
+    }
+  }
+
+  function handleTopicAttachmentsChange(topic, atts) {
+    setTopicsWithoutAttachments((prev) =>
+      atts.length > 0 ? prev.filter((t) => t !== topic) : prev.includes(topic) ? prev : [...prev, topic]
+    )
+  }
+
+  function handleGradeNewSubmissions() {
+    if (useTopicAttachments && topicsWithoutAttachments.length > 0) {
+      setShowMissingAttachmentsConfirm(true)
+      return
+    }
+    doGradeNewSubmissions()
   }
 
   async function handleCancelPreview() {
@@ -310,24 +413,37 @@ export default function GradingSetupPage() {
   if (loading) return <Layout><p className="text-gray-500">Loading…</p></Layout>
   if (!assignment) return <Layout><p className="text-red-600">Assignment not found.</p></Layout>
 
-  const isRnM = assignment.assignment_type === 'resources_and_moderations'
-  const identical = !isRnM || markIdentically
-
   const status = previewJob?.status
   const isRunning = status === 'queued' || status === 'running'
-  const isComplete = status === 'complete' && previewResults && previewResults.length > 0
-  const progressPct = previewJob && previewJob.total > 0
-    ? Math.min(100, Math.round((previewJob.graded / previewJob.total) * 100))
-    : 0
   const sampleSize = previewJob?.preview_sample_size ?? 3
-  const previewResourceResults = (previewResults ?? []).filter((r) => r.result_type === 'resource')
+  // Guard against graded briefly exceeding total during extension ramp-up
+  const displayTotal = Math.max(previewJob?.total ?? 0, previewJob?.graded ?? 0)
+  const progressPct = displayTotal > 0
+    ? Math.min(100, Math.round(((previewJob?.graded ?? 0) / displayTotal) * 100))
+    : 0
 
-  // Derive ordered level titles from rubric (highest → lowest points)
-  const levelOrder = rubric?.criteria?.[0]?.levels
-    ? [...rubric.criteria[0].levels].sort((a, b) => b.points - a.points).map((l) => l.title)
+  const allResults = previewResults ?? []
+  const resourceResults = allResults.filter((r) => r.result_type === 'resource')
+  const moderationResults = allResults.filter((r) => r.result_type === 'moderation')
+  const hasResourceResults = resourceResults.length > 0
+  const hasModerationResults = moderationResults.length > 0
+  const hasAnyResults = hasResourceResults || hasModerationResults
+  // Extended = more samples than the initial run (user clicked Extend at least once)
+  const resourceExtended = resourceResults.length > sampleSize
+  const moderationExtended = moderationResults.length > sampleSize
+  const clearLabel = hasResourceResults && hasModerationResults ? 'Clear All Previews' : 'Clear Preview'
+
+  // isComplete: we have at least one result and no job is running
+  const isComplete = !isRunning && hasAnyResults
+
+  // The rubric to use for the current tab's grade bands
+  const activeRubric = previewTab === 'moderation' && !rubricLinked ? moderationRubric : rubric
+  const activeResults = previewTab === 'moderation' ? moderationResults : resourceResults
+
+  const levelOrder = activeRubric?.criteria?.[0]?.levels
+    ? [...activeRubric.criteria[0].levels].sort((a, b) => b.points - a.points).map((l) => l.title)
     : []
 
-  // Determine the "overall grade" for a result as the most common level title across criteria
   function getOverallGrade(result) {
     const counts = {}
     ;(result.criterion_grades ?? []).forEach((g) => {
@@ -336,9 +452,8 @@ export default function GradingSetupPage() {
     return Object.entries(counts).sort((a, b) => b[1] - a[1])[0]?.[0] ?? null
   }
 
-  // Group results by overall grade label
   const resultsByGrade = {}
-  previewResourceResults.forEach((r) => {
+  activeResults.forEach((r) => {
     const grade = getOverallGrade(r)
     if (grade) {
       if (!resultsByGrade[grade]) resultsByGrade[grade] = []
@@ -346,10 +461,8 @@ export default function GradingSetupPage() {
     }
   })
 
-  // Auto-select first populated grade when results arrive
   const firstPopulatedGrade = levelOrder.find((t) => resultsByGrade[t]?.length > 0) ?? null
   const activeGrade = selectedGrade ?? firstPopulatedGrade
-
   const filteredResults = activeGrade ? (resultsByGrade[activeGrade] ?? []) : []
   const currentResult = filteredResults[previewIdx] ?? null
 
@@ -357,6 +470,15 @@ export default function GradingSetupPage() {
     setSelectedGrade(grade)
     setPreviewIdx(0)
   }
+
+  function handlePreviewTabChange(tab) {
+    setPreviewTab(tab)
+    setSelectedGrade(null)
+    setPreviewIdx(0)
+  }
+
+  // Which preview type is currently running (if any)
+  const runningType = isRunning ? (previewJob?.preview_type || 'resource') : null
 
   const inputCls = 'w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500'
 
@@ -381,6 +503,71 @@ export default function GradingSetupPage() {
         </div>
 
         <SharedBanner />
+
+        {/* ── New Submissions Banner ── */}
+        {isNewSubmissionsMode && (
+          <section className="bg-green-50 border-2 border-green-300 rounded-xl p-6 space-y-4">
+            <div className="flex items-start justify-between gap-6">
+              <div className="space-y-1.5">
+                <h2 className="text-lg font-bold text-green-900">New submissions are ready to grade</h2>
+                <p className="text-sm text-green-800">
+                  Your previous AI settings are saved and ready to go — you can kick off grading right now.
+                  Or scroll down to tweak settings or run a fresh preview first.
+                </p>
+              </div>
+              <div className="shrink-0">
+                {showMissingAttachmentsConfirm ? (
+                  <div className="space-y-2 text-right">
+                    <p className="text-sm font-medium text-amber-700">
+                      You haven't added attachments for{' '}
+                      {topicsWithoutAttachments.length === 1
+                        ? <strong>{topicsWithoutAttachments[0]}</strong>
+                        : <strong>{topicsWithoutAttachments.length} topics</strong>
+                      }
+                      . Grade anyway?
+                    </p>
+                    <div className="flex gap-2 justify-end">
+                      <button
+                        onClick={doGradeNewSubmissions}
+                        disabled={startingNewSubmissions}
+                        className="px-3 py-1.5 bg-green-600 text-white text-sm font-semibold rounded-lg hover:bg-green-700 disabled:opacity-50"
+                      >
+                        {startingNewSubmissions ? 'Starting…' : 'Yes, grade now'}
+                      </button>
+                      <button
+                        onClick={() => setShowMissingAttachmentsConfirm(false)}
+                        className="px-3 py-1.5 border border-gray-300 text-sm rounded-lg hover:bg-gray-50"
+                      >
+                        No, go back
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <button
+                    onClick={handleGradeNewSubmissions}
+                    disabled={startingNewSubmissions}
+                    className="px-5 py-2.5 bg-green-600 text-white text-sm font-bold rounded-lg hover:bg-green-700 disabled:opacity-50 shadow-sm"
+                  >
+                    {startingNewSubmissions ? 'Starting…' : 'Continue with current settings →'}
+                  </button>
+                )}
+              </div>
+            </div>
+            {useTopicAttachments && topicsWithoutAttachments.length > 0 && !showMissingAttachmentsConfirm && (
+              <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 text-sm text-amber-800">
+                <span className="shrink-0 mt-0.5">⚠</span>
+                <span>
+                  {topicsWithoutAttachments.length === 1 ? (
+                    <>A new topic (<strong>{topicsWithoutAttachments[0]}</strong>) has no attachments yet — the AI won't have reference files for it.</>
+                  ) : (
+                    <>{topicsWithoutAttachments.length} topics have no attachments yet — the AI won't have reference files for them.</>
+                  )}
+                  {' '}Scroll down to add files under <strong>Topic-specific attachments</strong>.
+                </span>
+              </div>
+            )}
+          </section>
+        )}
 
         {error && (
           <div className="flex items-start justify-between bg-red-50 border border-red-200 rounded-lg px-4 py-3 text-sm text-red-700">
@@ -421,75 +608,108 @@ export default function GradingSetupPage() {
             />
           </div>
 
-          {assignment?.assignment_type === 'resources_and_moderations' && (
-            <label className="flex items-center gap-2 cursor-pointer select-none">
-              <input
-                type="checkbox"
-                className="w-4 h-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
-                checked={markIdentically}
-                disabled={isRunning}
-                onChange={(e) => setMarkIdentically(e.target.checked)}
-              />
-              <span className="text-sm text-gray-700">Mark resources and moderations identically</span>
-            </label>
-          )}
+          {/* ── Rubric ── */}
+          <div className="border-t border-gray-100 pt-4 space-y-3">
+            <div className="flex items-center gap-2">
+              <div>
+                <p className="text-sm font-medium text-gray-700">Rubric</p>
+                <p className="text-xs text-gray-400 mt-0.5">Changes here update the assignment rubric.</p>
+              </div>
+              {isRnM && (
+                <LinkToggle
+                  linked={sameRubric}
+                  onToggle={setSameRubric}
+                  linkedTip="Rubric is shared with moderations — click to use separate rubrics"
+                  unlinkedTip="Using separate rubrics — click to share the same rubric for both"
+                />
+              )}
+            </div>
 
-          {/* Rubric + Additional notes */}
-          <div className="border-t border-gray-100 pt-4">
-            {!identical ? (
+            {!rubricLinked ? (
               <div className="space-y-4">
-                {[
-                  { label: 'Resources', rubric, setRubric, notes: additionalNotes, setNotes: setAdditionalNotes, placeholder: 'Extra context the AI should consider when grading resources.' },
-                  { label: 'Moderations', rubric: moderationRubric, setRubric: setModerationRubric, notes: moderationNotes, setNotes: setModerationNotes, placeholder: 'Extra context the AI should consider when grading moderations.' },
-                ].map(({ label, rubric: r, setRubric: setR, notes, setNotes, placeholder }) => (
-                  <div key={label} className="border border-gray-200 rounded-lg p-4 space-y-4">
-                    <h3 className="text-sm font-semibold text-gray-700">{label} Settings</h3>
-                    <div className="space-y-3">
-                      <p className="text-sm font-medium text-gray-700">Rubric</p>
-                      <RubricIngestUploader onRubricExtracted={setR} disabled={isRunning} />
-                      <RubricEditor rubric={r} onChange={setR} disabled={isRunning} />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">Additional notes for AI</label>
-                      <textarea
-                        rows={4}
-                        className={inputCls}
-                        placeholder={placeholder}
-                        value={notes}
-                        onChange={(e) => setNotes(e.target.value)}
-                        disabled={isRunning}
-                      />
-                    </div>
-                  </div>
-                ))}
+                <div>
+                  <p className="text-xs font-medium text-gray-500 mb-2">Resources</p>
+                  <RubricBlock rubric={rubric} setRubric={setRubric} />
+                </div>
+                <div>
+                  <p className="text-xs font-medium text-gray-500 mb-2">Moderations</p>
+                  <RubricBlock rubric={moderationRubric} setRubric={setModerationRubric} />
+                </div>
               </div>
             ) : (
-              <div className="space-y-3">
+              <RubricBlock rubric={rubric} setRubric={setRubric} />
+            )}
+          </div>
+
+          {/* ── Additional Notes ── */}
+          <div className="border-t border-gray-100 pt-4">
+            {!notesLinked ? (
+              <div className="grid grid-cols-2 gap-6">
                 <div>
-                  <p className="text-sm font-medium text-gray-700">Rubric</p>
-                  <p className="text-xs text-gray-400 mt-0.5">Changes here update the assignment rubric.</p>
-                </div>
-                <RubricIngestUploader onRubricExtracted={setRubric} disabled={isRunning} />
-                <RubricEditor rubric={rubric} onChange={setRubric} disabled={isRunning} />
-                <div className="pt-2">
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Additional notes for AI
-                    <span className="ml-1.5 font-normal text-gray-400 text-xs">— shared with the assignment</span>
-                  </label>
+                  <div className="flex items-center gap-1.5 mb-1">
+                    <label className="text-sm font-medium text-gray-700">
+                      Additional notes for AI
+                      <span className="ml-1.5 font-normal text-gray-400 text-xs">— shared with the assignment</span>
+                    </label>
+                    <LinkToggle
+                      linked={false}
+                      onToggle={setSameNotes}
+                      linkedTip=""
+                      unlinkedTip="Using separate notes — click to share the same notes for both"
+                    />
+                  </div>
+                  <p className="text-xs text-gray-400 mb-1">Resources</p>
                   <textarea
                     rows={4}
                     className={inputCls}
-                    placeholder="Extra context the AI should consider — e.g. common mistakes to watch for, clarifications on the rubric, or marking conventions specific to this assessment."
+                    placeholder="Extra context for grading resources."
                     value={additionalNotes}
                     onChange={(e) => setAdditionalNotes(e.target.value)}
                     disabled={isRunning}
                   />
                 </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">&nbsp;</label>
+                  <p className="text-xs text-gray-400 mb-1">Moderations</p>
+                  <textarea
+                    rows={4}
+                    className={inputCls}
+                    placeholder="Extra context for grading moderations."
+                    value={moderationNotes}
+                    onChange={(e) => setModerationNotes(e.target.value)}
+                    disabled={isRunning}
+                  />
+                </div>
+              </div>
+            ) : (
+              <div>
+                <div className="flex items-center gap-1.5 mb-1">
+                  <label className="text-sm font-medium text-gray-700">
+                    Additional notes for AI
+                    <span className="ml-1.5 font-normal text-gray-400 text-xs">— shared with the assignment</span>
+                  </label>
+                  {isRnM && (
+                    <LinkToggle
+                      linked={true}
+                      onToggle={setSameNotes}
+                      linkedTip="Notes are shared with moderations — click to use separate notes"
+                      unlinkedTip=""
+                    />
+                  )}
+                </div>
+                <textarea
+                  rows={4}
+                  className={inputCls}
+                  placeholder="Extra context the AI should consider — e.g. common mistakes to watch for, clarifications on the rubric, or marking conventions specific to this assessment."
+                  value={additionalNotes}
+                  onChange={(e) => setAdditionalNotes(e.target.value)}
+                  disabled={isRunning}
+                />
               </div>
             )}
           </div>
 
-          {/* Topic Attachments */}
+          {/* ── Topic Attachments ── */}
           <div className="border border-gray-200 rounded-lg p-4 space-y-3">
             <label className="flex items-start gap-3 cursor-pointer select-none">
               <input
@@ -511,20 +731,31 @@ export default function GradingSetupPage() {
             </label>
 
             {useTopicAttachments && (
-              <div>
-                <label className="block text-xs font-medium text-gray-700 mb-1">
-                  Attachment instructions
-                  <span className="ml-1 font-normal text-gray-400">— tell the AI what these files are and how to use them</span>
-                </label>
-                <textarea
-                  className={inputCls}
-                  rows={3}
-                  placeholder="e.g. The attached files are lecture slides for this topic. Use them to assess whether the student's submission demonstrates knowledge of the key concepts covered in class."
-                  value={topicAttachmentInstructions}
-                  disabled={isRunning}
-                  onChange={(e) => setTopicAttachmentInstructions(e.target.value)}
+              <>
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">
+                    Attachment instructions
+                    <span className="ml-1 font-normal text-gray-400">— global rule for how the AI should use these files across all topics</span>
+                  </label>
+                  <textarea
+                    className={inputCls}
+                    rows={3}
+                    placeholder="e.g. The attached files are lecture slides for this topic. Use them to assess whether the student's submission demonstrates knowledge of the key concepts covered in class."
+                    value={topicAttachmentInstructions}
+                    disabled={isRunning}
+                    onChange={(e) => setTopicAttachmentInstructions(e.target.value)}
+                  />
+                </div>
+
+                <TopicAttachmentManager
+                  classId={classId}
+                  assignmentId={assignmentId}
+                  globalInstruction={topicAttachmentInstructions}
+                  overrides={topicInstructionOverrides}
+                  onOverrideChange={setTopicInstructionOverrides}
+                  onAttachmentsChange={isNewSubmissionsMode ? handleTopicAttachmentsChange : undefined}
                 />
-              </div>
+              </>
             )}
           </div>
         </section>
@@ -602,118 +833,14 @@ export default function GradingSetupPage() {
             </div>
           </div>
 
-          {/* Feedback Detail */}
+          {/* Output Format */}
           <div>
-            <p className="text-sm font-medium text-gray-700 mb-1.5">
-              Feedback Detail
-              <span className="ml-1.5 font-normal text-gray-400 text-xs">— shared with the assignment</span>
+            <p className="text-xs font-normal text-gray-400 mb-1">
+              <span className="text-sm font-medium text-gray-700">Output Format</span>
+              <span className="ml-1.5">— shared with the assignment</span>
             </p>
-            <div className="flex gap-2">
-              {RESPONSE_DETAILS.map((d) => {
-                const active = responseDetail === d.value
-                return (
-                  <button
-                    key={d.value}
-                    type="button"
-                    disabled={isRunning}
-                    onClick={() => setResponseDetail(d.value)}
-                    className={`flex-1 text-center px-2 py-2 rounded-lg border transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
-                      active
-                        ? 'border-indigo-500 bg-indigo-50 ring-1 ring-indigo-500'
-                        : 'border-gray-300 hover:border-gray-400 hover:bg-gray-50'
-                    }`}
-                  >
-                    <span className={`block text-xs font-semibold ${active ? 'text-indigo-700' : 'text-gray-800'}`}>
-                      {d.label}
-                    </span>
-                    <span className={`block text-xs mt-0.5 ${active ? 'text-indigo-600' : 'text-gray-500'}`}>
-                      {d.description}
-                    </span>
-                  </button>
-                )
-              })}
-            </div>
+            <FeedbackFormatPicker value={feedbackFormat} onChange={setFeedbackFormat} disabled={isRunning} />
           </div>
-
-          {/* Strictness — split if R&M with separate settings */}
-          {!identical ? (
-            <div className="space-y-4">
-              {[
-                { label: 'Resources', value: strictness, onChange: setStrictness },
-                { label: 'Moderations', value: moderationStrictness, onChange: setModerationStrictness },
-              ].map(({ label, value: val, onChange }) => (
-                <div key={label} className="border border-gray-200 rounded-lg p-4">
-                  <h3 className="text-sm font-semibold text-gray-700 mb-3">{label} Settings</h3>
-                  <p className="text-sm font-medium text-gray-700 mb-1.5">Strictness</p>
-                  <div className="flex gap-2">
-                    {[
-                      { value: 'lenient', label: 'Lenient', description: 'Generous on partial evidence' },
-                      { value: 'standard', label: 'Standard', description: 'Apply criteria as written' },
-                      { value: 'strict', label: 'Strict', description: 'All descriptors must be met' },
-                    ].map((s) => {
-                      const active = val === s.value
-                      return (
-                        <button
-                          key={s.value}
-                          type="button"
-                          disabled={isRunning}
-                          onClick={() => onChange(s.value)}
-                          className={`flex-1 text-center px-2 py-2 rounded-lg border transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
-                            active
-                              ? 'border-indigo-500 bg-indigo-50 ring-1 ring-indigo-500'
-                              : 'border-gray-300 hover:border-gray-400 hover:bg-gray-50'
-                          }`}
-                        >
-                          <span className={`block text-xs font-semibold ${active ? 'text-indigo-700' : 'text-gray-800'}`}>
-                            {s.label}
-                          </span>
-                          <span className={`block text-xs mt-0.5 ${active ? 'text-indigo-600' : 'text-gray-500'}`}>
-                            {s.description}
-                          </span>
-                        </button>
-                      )
-                    })}
-                  </div>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div>
-              <p className="text-sm font-medium text-gray-700 mb-1.5">
-                Strictness
-                <span className="ml-1.5 font-normal text-gray-400 text-xs">— shared with the assignment</span>
-              </p>
-              <div className="flex gap-2">
-                {[
-                  { value: 'lenient', label: 'Lenient', description: 'Generous on partial evidence' },
-                  { value: 'standard', label: 'Standard', description: 'Apply criteria as written' },
-                  { value: 'strict', label: 'Strict', description: 'All descriptors must be met' },
-                ].map((s) => {
-                  const active = strictness === s.value
-                  return (
-                    <button
-                      key={s.value}
-                      type="button"
-                      disabled={isRunning}
-                      onClick={() => setStrictness(s.value)}
-                      className={`flex-1 text-center px-2 py-2 rounded-lg border transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
-                        active
-                          ? 'border-indigo-500 bg-indigo-50 ring-1 ring-indigo-500'
-                          : 'border-gray-300 hover:border-gray-400 hover:bg-gray-50'
-                      }`}
-                    >
-                      <span className={`block text-xs font-semibold ${active ? 'text-indigo-700' : 'text-gray-800'}`}>
-                        {s.label}
-                      </span>
-                      <span className={`block text-xs mt-0.5 ${active ? 'text-indigo-600' : 'text-gray-500'}`}>
-                        {s.description}
-                      </span>
-                    </button>
-                  )
-                })}
-              </div>
-            </div>
-          )}
         </section>
 
         {/* ── Preview ── */}
@@ -723,12 +850,12 @@ export default function GradingSetupPage() {
               <h2 className="font-semibold text-gray-800">Preview</h2>
               {markingMode === 'teacher_supervised_ai' && (
                 <p className="text-xs text-gray-400 mt-0.5">
-                  Grades {sampleSize} sample submission{sampleSize !== 1 ? 's' : ''} with the current settings. Adjust and rerun until satisfied.
+                  Grades {sampleSize} sample submissions with the current settings. Extend to seek grade spread (up to 15 total).
                 </p>
               )}
             </div>
             {markingMode === 'teacher_supervised_ai' && (
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap justify-end">
                 {isRunning && (
                   <button
                     onClick={handleCancelPreview}
@@ -737,31 +864,56 @@ export default function GradingSetupPage() {
                     Cancel
                   </button>
                 )}
-                {isComplete && (
+                {hasAnyResults && !isRunning && !running && !extending && (
                   <button
-                    onClick={handleFindSpread}
-                    disabled={isRunning || extending}
-                    title="Grades more samples until scores span a wide range (up to 15 total)"
-                    className={`px-3 py-1.5 text-sm rounded-lg border ${
-                      isRunning || extending
-                        ? 'border-gray-200 text-gray-400 cursor-not-allowed'
-                        : 'border-indigo-300 text-indigo-700 hover:bg-indigo-50'
-                    }`}
+                    onClick={handleClearAllPreviews}
+                    disabled={clearing}
+                    className="px-3 py-1.5 text-sm border border-red-200 text-red-600 rounded-lg hover:bg-red-50 disabled:opacity-50"
                   >
-                    {extending ? 'Finding…' : 'Find Spread'}
+                    {clearing ? 'Clearing…' : clearLabel}
                   </button>
                 )}
-                <button
-                  onClick={handleRunPreview}
-                  disabled={isRunning || running}
-                  className={`px-3 py-1.5 text-sm rounded-lg ${
-                    isRunning || running
-                      ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
-                      : 'bg-indigo-600 text-white hover:bg-indigo-700'
-                  }`}
-                >
-                  {running ? 'Starting…' : isComplete ? 'Rerun Preview' : 'Run Preview'}
-                </button>
+                {/* Extend and Run buttons — hidden entirely while any grading is active */}
+                {!isRunning && !running && !extending && (
+                  <>
+                    {hasResourceResults && !resourceExtended && (
+                      <button
+                        onClick={() => handleExtendPreview('resource')}
+                        title="Grade more resource samples seeking grade spread (up to 15 total)"
+                        className="px-3 py-1.5 text-sm rounded-lg border transition-colors border-indigo-300 text-indigo-700 hover:bg-indigo-50"
+                      >
+                        Extend Resource Preview
+                      </button>
+                    )}
+                    {isRnM && hasModerationResults && !moderationExtended && (
+                      <button
+                        onClick={() => handleExtendPreview('moderation')}
+                        title="Grade more moderation samples seeking grade spread (up to 15 total)"
+                        className="px-3 py-1.5 text-sm rounded-lg border transition-colors border-violet-300 text-violet-700 hover:bg-violet-50"
+                      >
+                        Extend Moderation Preview
+                      </button>
+                    )}
+                    {!hasResourceResults && (
+                      <button
+                        onClick={() => handleRunPreview('resource')}
+                        title="Grade 3 sample resource submissions"
+                        className="px-3 py-1.5 text-sm rounded-lg border transition-colors bg-indigo-600 border-indigo-600 text-white hover:bg-indigo-700"
+                      >
+                        Run Resource Preview
+                      </button>
+                    )}
+                    {isRnM && !hasModerationResults && (
+                      <button
+                        onClick={() => handleRunPreview('moderation')}
+                        title="Grade 3 sample moderation submissions"
+                        className="px-3 py-1.5 text-sm rounded-lg border transition-colors bg-violet-600 border-violet-600 text-white hover:bg-violet-700"
+                      >
+                        Run Moderation Preview
+                      </button>
+                    )}
+                  </>
+                )}
               </div>
             )}
           </div>
@@ -776,11 +928,13 @@ export default function GradingSetupPage() {
               {isRunning && (
                 <div>
                   <p className="text-sm text-gray-500 mb-1">
-                    {previewJob.total === 0 ? 'Starting…' : `Grading… ${previewJob.graded} / ${previewJob.total}`}
+                    {displayTotal === 0
+                      ? `Starting ${runningType === 'moderation' ? 'moderation' : 'resource'} preview…`
+                      : `Grading ${runningType === 'moderation' ? 'moderations' : 'resources'}… ${previewJob.graded} / ${displayTotal}`}
                   </p>
                   <div className="w-full bg-gray-200 rounded-full h-2">
                     <div
-                      className="bg-indigo-500 h-2 rounded-full transition-all"
+                      className={`h-2 rounded-full transition-all ${runningType === 'moderation' ? 'bg-violet-500' : 'bg-indigo-500'}`}
                       style={{ width: (status === 'queued' || previewJob.total === 0) ? '0%' : `${progressPct}%` }}
                     />
                   </div>
@@ -788,95 +942,148 @@ export default function GradingSetupPage() {
               )}
 
               {/* No preview yet */}
-              {!previewJob && !isRunning && (
+              {!hasAnyResults && !isRunning && (
                 <p className="text-sm text-gray-400">
                   Run a preview to see how the AI grades sample submissions with the current settings.
                 </p>
               )}
 
-              {/* Results — grade band grid + one at a time */}
-              {isComplete && levelOrder.length > 0 && (
+              {/* Results — Resources / Moderations tab toggle + grade band grid */}
+              {(hasAnyResults || (isRunning && allResults.length > 0)) && (
                 <div className="space-y-4">
-                  {totalResources != null && (
+                  {/* Tab toggle — only shown for R&M assignments */}
+                  {isRnM && (hasResourceResults || hasModerationResults) && (
+                    <div className="flex gap-1 border-b border-gray-200 pb-0">
+                      {[
+                        { key: 'resource', label: 'Resources', has: hasResourceResults },
+                        { key: 'moderation', label: 'Moderations', has: hasModerationResults },
+                      ].map(({ key, label, has }) => (
+                        <button
+                          key={key}
+                          onClick={() => has && handlePreviewTabChange(key)}
+                          className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors ${
+                            previewTab === key
+                              ? key === 'moderation'
+                                ? 'border-violet-600 text-violet-700'
+                                : 'border-indigo-600 text-indigo-700'
+                              : has
+                              ? 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                              : 'border-transparent text-gray-300 cursor-default'
+                          }`}
+                        >
+                          {label}
+                          {has && (
+                            <span className={`ml-1.5 text-xs px-1.5 py-0.5 rounded-full ${
+                              previewTab === key
+                                ? key === 'moderation' ? 'bg-violet-100 text-violet-700' : 'bg-indigo-100 text-indigo-700'
+                                : 'bg-gray-100 text-gray-500'
+                            }`}>
+                              {key === 'resource' ? resourceResults.length : moderationResults.length}
+                            </span>
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Sample count line */}
+                  {totalResources != null && previewTab === 'resource' && (
                     <p className="text-xs text-gray-400">
-                      {previewResourceResults.length} of {totalResources} resource{totalResources !== 1 ? 's' : ''} sampled
-                      {previewResourceResults.length >= totalResources && (
+                      {resourceResults.length} of {totalResources} resource{totalResources !== 1 ? 's' : ''} sampled
+                      {resourceResults.length >= totalResources && (
                         <span className="ml-1 text-amber-500">— all resources graded, no more available</span>
                       )}
-                      {previewResourceResults.length < totalResources && previewResourceResults.length >= 15 && (
+                      {resourceResults.length < totalResources && resourceResults.length >= 15 && (
                         <span className="ml-1">— maximum sample size reached</span>
                       )}
                     </p>
                   )}
-                  {/* Grade band grid */}
-                  <div className="grid gap-2" style={{ gridTemplateColumns: `repeat(${levelOrder.length}, minmax(0, 1fr))` }}>
-                    {levelOrder.map((title) => {
-                      const count = resultsByGrade[title]?.length ?? 0
-                      const isActive = activeGrade === title
-                      return (
-                        <button
-                          key={title}
-                          onClick={() => count > 0 && handleSelectGrade(title)}
-                          className={`rounded-lg border px-2 py-2.5 text-center transition-colors ${
-                            isActive && count > 0
-                              ? 'bg-indigo-600 border-indigo-600 text-white'
-                              : count > 0
-                              ? 'border-gray-300 hover:border-indigo-400 hover:bg-indigo-50 cursor-pointer'
-                              : 'border-gray-100 text-gray-300 cursor-default'
-                          }`}
-                        >
-                          <div className="text-xs font-semibold truncate">{title}</div>
-                          <div className={`text-xl font-bold leading-tight mt-0.5 ${count === 0 ? 'text-gray-200' : isActive ? 'text-white' : 'text-gray-700'}`}>
-                            {count}
-                          </div>
-                        </button>
-                      )
-                    })}
-                  </div>
 
-                  {/* Sample viewer */}
-                  {activeGrade && filteredResults.length === 0 && (
-                    <p className="text-sm text-gray-400 italic text-center py-6 border border-dashed border-gray-200 rounded-lg">
-                      No samples at <strong>{activeGrade}</strong> yet — use "Find Spread" to grade more samples.
+                  {/* No results for this tab yet */}
+                  {activeResults.length === 0 && !isRunning && (
+                    <p className="text-sm text-gray-400 italic">
+                      No {previewTab === 'moderation' ? 'moderation' : 'resource'} samples yet — run the{' '}
+                      {previewTab === 'moderation' ? 'Moderation' : 'Resource'} Preview above.
                     </p>
                   )}
 
-                  {activeGrade && filteredResults.length > 0 && (
-                    <div className="space-y-3">
-                      <div className="flex items-center justify-between">
-                        <span className="text-sm text-gray-600">
-                          <span className="font-semibold">{activeGrade}</span>
-                          {' · '}sample <span className="font-semibold">{previewIdx + 1}</span> of {filteredResults.length}
-                        </span>
-                        <div className="flex items-center gap-2">
-                          <button
-                            onClick={() => setPreviewIdx((i) => Math.max(0, i - 1))}
-                            disabled={previewIdx === 0}
-                            className="px-3 py-1.5 text-sm border border-gray-300 rounded-lg disabled:opacity-40 hover:bg-gray-50 disabled:cursor-not-allowed"
-                          >
-                            ← Previous
-                          </button>
-                          <button
-                            onClick={() => setPreviewIdx((i) => Math.min(filteredResults.length - 1, i + 1))}
-                            disabled={previewIdx === filteredResults.length - 1}
-                            className="px-3 py-1.5 text-sm border border-gray-300 rounded-lg disabled:opacity-40 hover:bg-gray-50 disabled:cursor-not-allowed"
-                          >
-                            Next →
-                          </button>
-                        </div>
+                  {/* Grade band grid */}
+                  {activeResults.length > 0 && levelOrder.length > 0 && (
+                    <>
+                      <div className="grid gap-2" style={{ gridTemplateColumns: `repeat(${levelOrder.length}, minmax(0, 1fr))` }}>
+                        {levelOrder.map((title) => {
+                          const count = resultsByGrade[title]?.length ?? 0
+                          const isActive = activeGrade === title
+                          return (
+                            <button
+                              key={title}
+                              onClick={() => count > 0 && handleSelectGrade(title)}
+                              className={`rounded-lg border px-2 py-2.5 text-center transition-colors ${
+                                isActive && count > 0
+                                  ? previewTab === 'moderation'
+                                    ? 'bg-violet-600 border-violet-600 text-white'
+                                    : 'bg-indigo-600 border-indigo-600 text-white'
+                                  : count > 0
+                                  ? previewTab === 'moderation'
+                                    ? 'border-gray-300 hover:border-violet-400 hover:bg-violet-50 cursor-pointer'
+                                    : 'border-gray-300 hover:border-indigo-400 hover:bg-indigo-50 cursor-pointer'
+                                  : 'border-gray-100 text-gray-300 cursor-default'
+                              }`}
+                            >
+                              <div className="text-xs font-semibold truncate">{title}</div>
+                              <div className={`text-xl font-bold leading-tight mt-0.5 ${count === 0 ? 'text-gray-200' : isActive ? 'text-white' : 'text-gray-700'}`}>
+                                {count}
+                              </div>
+                            </button>
+                          )
+                        })}
                       </div>
-                      <PreviewResultCard
-                        key={currentResult?.id}
-                        result={currentResult}
-                        rubric={rubric}
-                        index={previewIdx}
-                      />
-                    </div>
+
+                      {/* Sample viewer */}
+                      {activeGrade && filteredResults.length === 0 && (
+                        <p className="text-sm text-gray-400 italic text-center py-6 border border-dashed border-gray-200 rounded-lg">
+                          No samples at <strong>{activeGrade}</strong> yet — extend the preview to grade more samples.
+                        </p>
+                      )}
+
+                      {activeGrade && filteredResults.length > 0 && (
+                        <div className="space-y-3">
+                          <div className="flex items-center justify-between">
+                            <span className="text-sm text-gray-600">
+                              <span className="font-semibold">{activeGrade}</span>
+                              {' · '}sample <span className="font-semibold">{previewIdx + 1}</span> of {filteredResults.length}
+                            </span>
+                            <div className="flex items-center gap-2">
+                              <button
+                                onClick={() => setPreviewIdx((i) => Math.max(0, i - 1))}
+                                disabled={previewIdx === 0}
+                                className="px-3 py-1.5 text-sm border border-gray-300 rounded-lg disabled:opacity-40 hover:bg-gray-50 disabled:cursor-not-allowed"
+                              >
+                                ← Previous
+                              </button>
+                              <button
+                                onClick={() => setPreviewIdx((i) => Math.min(filteredResults.length - 1, i + 1))}
+                                disabled={previewIdx === filteredResults.length - 1}
+                                className="px-3 py-1.5 text-sm border border-gray-300 rounded-lg disabled:opacity-40 hover:bg-gray-50 disabled:cursor-not-allowed"
+                              >
+                                Next →
+                              </button>
+                            </div>
+                          </div>
+                          <PreviewResultCard
+                            key={currentResult?.id}
+                            result={currentResult}
+                            rubric={activeRubric}
+                            index={previewIdx}
+                          />
+                        </div>
+                      )}
+                    </>
                   )}
                 </div>
               )}
 
-              {status === 'cancelled' && !isComplete && (
+              {status === 'cancelled' && !hasAnyResults && (
                 <p className="text-sm text-gray-400">Preview cancelled. Adjust settings and run again.</p>
               )}
 

@@ -15,6 +15,7 @@ class GradingJob(Base):
     )
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued")
     is_preview: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    preview_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
     preview_sample_size: Mapped[int] = mapped_column(nullable=False, default=3)
     total: Mapped[int] = mapped_column(nullable=False, default=0)
     graded: Mapped[int] = mapped_column(nullable=False, default=0)

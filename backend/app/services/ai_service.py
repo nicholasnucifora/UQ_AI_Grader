@@ -17,18 +17,7 @@ class AIService:
         }
         return mapping.get(tier or "haiku", settings.anthropic_haiku)
 
-    _DETAIL_INSTRUCTIONS = {
-        "concise": (
-            "Keep feedback concise — one or two sentences per criterion. "
-            "Focus on the single most important reason for the grade awarded."
-        ),
-        "standard": "Provide clear, balanced feedback for each criterion.",
-        "detailed": (
-            "Provide thorough, detailed feedback for each criterion: reference specific evidence "
-            "from the submission, explain your grade decision fully, and give concrete, actionable "
-            "improvement suggestions."
-        ),
-    }
+    _DEFAULT_FEEDBACK_FORMAT = "Provide clear, balanced feedback for each criterion."
 
     def _build_context_section(self, context: dict | None) -> str:
         """Build a grading context block from assignment/class metadata."""
@@ -70,10 +59,9 @@ class AIService:
         self,
         sections: list[str],
         rubric: dict,
-        strictness: str,
         context: dict | None = None,
         model: str | None = None,
-        response_detail: str = "standard",
+        feedback_format: str = "",
         topic_attachments: list[dict] | None = None,
         topic_attachment_instructions: str = "",
     ) -> dict:
@@ -83,13 +71,7 @@ class AIService:
         context: optional dict with class_description, assignment_description,
                  marking_criteria, additional_notes.
         """
-        strictness_instructions = {
-            "lenient": "err on the side of generosity when evidence is partial",
-            "standard": "apply criteria as written",
-            "strict": "only award a level if all descriptors are fully demonstrated",
-        }
-        strictness_note = strictness_instructions.get(strictness, "apply criteria as written")
-        detail_note = self._DETAIL_INSTRUCTIONS.get(response_detail, self._DETAIL_INSTRUCTIONS["standard"])
+        feedback_instruction = feedback_format.strip() or self._DEFAULT_FEEDBACK_FORMAT
 
         grade_tool = {
             "name": "submit_grade",
@@ -156,22 +138,37 @@ class AIService:
             f"### Section {i + 1}\n{s}" for i, s in enumerate(sections)
         )
 
-        user_message = (
-            f"Grade the following student submission against the rubric. "
-            f"Strictness instruction: {strictness_note}. "
-            f"Feedback detail: {detail_note}\n\n"
+        system_prompt = (
+            "You are an expert academic grader. "
+            "Grade the student submission against the rubric using the submit_grade tool.\n\n"
+            f"Feedback format: {feedback_instruction}\n\n"
             f"{context_section}"
             f"{attachments_section}"
-            f"{rubric_md}\n\n"
-            f"## Student Submission\n\n{content_block}"
+            f"{rubric_md}"
         )
+
+        use_thinking = model in ("sonnet", "opus")
+        max_tokens = 10048 if use_thinking else 2048
+        extra: dict = {}
+        if use_thinking:
+            extra["thinking"] = {"type": "enabled", "budget_tokens": 8000}
+
+        # Forced tool_choice is incompatible with extended thinking; use auto instead
+        # (the tool is still reliably called since it's the only one and the prompt instructs it)
+        tool_choice = {"type": "auto"} if use_thinking else {"type": "tool", "name": "submit_grade"}
 
         response = self._client.messages.create(
             model=self._resolve_model(model),
-            max_tokens=2048,
+            max_tokens=max_tokens,
+            system=[{
+                "type": "text",
+                "text": system_prompt,
+                "cache_control": {"type": "ephemeral"},
+            }],
             tools=[grade_tool],
-            tool_choice={"type": "tool", "name": "submit_grade"},
-            messages=[{"role": "user", "content": user_message}],
+            tool_choice=tool_choice,
+            messages=[{"role": "user", "content": f"## Student Submission\n\n{content_block}"}],
+            **extra,
         )
 
         for block in response.content:
@@ -185,10 +182,9 @@ class AIService:
         moderation_comment: str,
         original_sections: list[str],
         rubric: dict,
-        strictness: str,
         context: dict | None = None,
         model: str | None = None,
-        response_detail: str = "standard",
+        feedback_format: str = "",
     ) -> dict:
         """
         Grade a moderation comment against the rubric.
@@ -196,13 +192,7 @@ class AIService:
         assess how well the moderator engaged with and understood the submission.
         Returns the same shape as grade_submission.
         """
-        strictness_instructions = {
-            "lenient": "err on the side of generosity when evidence is partial",
-            "standard": "apply criteria as written",
-            "strict": "only award a level if all descriptors are fully demonstrated",
-        }
-        strictness_note = strictness_instructions.get(strictness, "apply criteria as written")
-        detail_note = self._DETAIL_INSTRUCTIONS.get(response_detail, self._DETAIL_INSTRUCTIONS["standard"])
+        feedback_instruction = feedback_format.strip() or self._DEFAULT_FEEDBACK_FORMAT
 
         grade_tool = {
             "name": "submit_grade",
@@ -244,27 +234,44 @@ class AIService:
             f"### Section {i + 1}\n{s}" for i, s in enumerate(original_sections)
         )
 
-        user_message = (
-            f"You are grading a student's moderation comment. "
-            f"The student was asked to review a peer's submission and provide constructive feedback. "
-            f"Grade the moderation comment against the rubric criteria — assess how well the student's "
-            f"feedback demonstrates understanding and engages meaningfully with the subject matter. "
-            f"Treat the moderation comment as the primary work being graded. "
-            f"The original submission is provided only as context so you can judge the quality of the moderation.\n\n"
-            f"Strictness instruction: {strictness_note}. "
-            f"Feedback detail: {detail_note}\n\n"
+        system_prompt = (
+            "You are an expert academic grader. "
+            "You are grading a student's moderation comment. "
+            "The student was asked to review a peer's submission and provide constructive feedback. "
+            "Grade the moderation comment against the rubric criteria — assess how well the student's "
+            "feedback demonstrates understanding and engages meaningfully with the subject matter. "
+            "Treat the moderation comment as the primary work being graded. "
+            "The original submission is provided only as context so you can judge the quality of the moderation.\n\n"
+            f"Feedback format: {feedback_instruction}\n\n"
             f"{context_section}"
-            f"{rubric_md}\n\n"
+            f"{rubric_md}"
+        )
+
+        user_message = (
             f"## Original Submission (context only — do not grade this)\n\n{original_block}\n\n"
             f"## Moderation Comment (grade this)\n\n{moderation_comment}"
         )
 
+        use_thinking = model in ("sonnet", "opus")
+        max_tokens = 10048 if use_thinking else 2048
+        extra: dict = {}
+        if use_thinking:
+            extra["thinking"] = {"type": "enabled", "budget_tokens": 8000}
+
+        tool_choice = {"type": "auto"} if use_thinking else {"type": "tool", "name": "submit_grade"}
+
         response = self._client.messages.create(
             model=self._resolve_model(model),
-            max_tokens=2048,
+            max_tokens=max_tokens,
+            system=[{
+                "type": "text",
+                "text": system_prompt,
+                "cache_control": {"type": "ephemeral"},
+            }],
             tools=[grade_tool],
-            tool_choice={"type": "tool", "name": "submit_grade"},
+            tool_choice=tool_choice,
             messages=[{"role": "user", "content": user_message}],
+            **extra,
         )
 
         for block in response.content:
@@ -384,6 +391,9 @@ class AIService:
             for level in sorted_levels:
                 lines.append(f"| {level['id']} | {level['title']} | {level['points']} | {level['description']} |")
             lines.append("")
+            if (criterion.get("ai_hint") or "").strip():
+                lines.append(f"> **Grading note (not visible to students):** {criterion['ai_hint'].strip()}")
+                lines.append("")
         return "\n".join(lines)
 
 

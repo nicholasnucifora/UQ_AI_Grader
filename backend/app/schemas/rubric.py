@@ -13,6 +13,7 @@ class RubricCriterion(BaseModel):
     name: str
     weight_percentage: float
     levels: list[RubricLevel]
+    ai_hint: str | None = None
 
 
 class RubricSchema(BaseModel):

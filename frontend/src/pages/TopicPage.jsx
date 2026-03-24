@@ -91,7 +91,7 @@ export default function TopicPage() {
   }
 
   async function handleEmailStudentAll(studentId, toEmail) {
-    return api.openStudentGradeEmail(classId, assignmentId, studentId, { toEmail })
+    return api.openStudentGradeEmail(classId, assignmentId, studentId, { toEmail, topic })
   }
 
   async function handleEmailStudentTopic(studentId, topicName, toEmail) {
@@ -214,9 +214,7 @@ export default function TopicPage() {
         {allResults === null ? (
           <p className="text-sm text-gray-500">Loading…</p>
         ) : topicResults.length === 0 ? (
-          <div className="bg-white border border-gray-200 rounded-xl p-8 text-center text-gray-500 text-sm">
-            No completed grades for this topic yet.
-          </div>
+          <p className="text-sm text-gray-400 mb-6">No completed grades for this topic yet.</p>
         ) : (
           <section className="bg-white border border-gray-200 rounded-xl mb-6 overflow-hidden">
             {/* Tab bar */}

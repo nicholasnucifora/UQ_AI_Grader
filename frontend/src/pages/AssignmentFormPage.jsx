@@ -1,202 +1,15 @@
 import { useState } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import Layout from '../components/Layout'
-import RubricIngestUploader from '../components/RubricIngestUploader'
-import RubricEditor from '../components/RubricEditor'
 import { api } from '../api/client'
-
-const MARKING_MODES = [
-  {
-    value: 'teacher_supervised_ai',
-    label: 'Teacher supervised AI marking',
-    description: 'Review AI-generated grading examples and refine the prompts until you are satisfied before grading runs.',
-  },
-  {
-    value: 'teacher_marking',
-    label: 'Teacher marking',
-    description: "AI uses the teacher's own marking as examples when grading student work.",
-  },
-]
-
-const AI_MODELS = [
-  { value: 'opus', label: 'Claude Opus', description: 'Smart, Expensive' },
-  { value: 'sonnet', label: 'Claude Sonnet', description: 'Recommended' },
-  { value: 'haiku', label: 'Claude Haiku', description: 'Fast, Cheap' },
-]
-
-const RESPONSE_DETAILS = [
-  { value: 'concise', label: 'Concise', description: 'Short, targeted feedback — one or two sentences per criterion' },
-  { value: 'standard', label: 'Standard', description: 'Balanced feedback covering each criterion clearly' },
-  { value: 'detailed', label: 'Detailed', description: 'Thorough feedback with specific evidence and improvement suggestions' },
-]
-
-const STRICTNESS_OPTIONS = [
-  { value: 'lenient', label: 'Lenient', description: 'Generous on partial evidence' },
-  { value: 'standard', label: 'Standard', description: 'Apply criteria as written' },
-  { value: 'strict', label: 'Strict', description: 'All descriptors must be met' },
-]
-
-function ButtonGroup({ label, options, value, onChange }) {
-  return (
-    <div>
-      <p className="text-sm font-medium text-gray-700 mb-1.5">{label}</p>
-      <div className="flex gap-2">
-        {options.map((opt) => {
-          const active = value === opt.value
-          return (
-            <button
-              key={opt.value}
-              type="button"
-              onClick={() => onChange(opt.value)}
-              className={`flex-1 text-center px-2 py-2 rounded-lg border transition-colors ${
-                active
-                  ? 'border-indigo-500 bg-indigo-50 ring-1 ring-indigo-500'
-                  : 'border-gray-300 hover:border-gray-400 hover:bg-gray-50'
-              }`}
-            >
-              <span className={`block text-xs font-semibold ${active ? 'text-indigo-700' : 'text-gray-800'}`}>
-                {opt.label}
-              </span>
-              <span className={`block text-xs mt-0.5 ${active ? 'text-indigo-600' : 'text-gray-500'}`}>
-                {opt.description}
-              </span>
-            </button>
-          )
-        })}
-      </div>
-    </div>
-  )
-}
-
-// Small inline toggle button placed next to a section heading.
-// linked=true → indigo "Shared", linked=false → gray "Separate"
-function LinkToggle({ linked, onToggle, linkedTip, unlinkedTip }) {
-  return (
-    <button
-      type="button"
-      onClick={() => onToggle(!linked)}
-      title={linked ? linkedTip : unlinkedTip}
-      className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-xs font-medium border transition-colors ${
-        linked
-          ? 'bg-indigo-50 border-indigo-200 text-indigo-600 hover:bg-indigo-100 hover:border-indigo-300'
-          : 'bg-white border-gray-200 text-gray-400 hover:bg-gray-50 hover:text-gray-600 hover:border-gray-300'
-      }`}
-    >
-      🔗 {linked ? 'Shared' : 'Separate'}
-    </button>
-  )
-}
-
-function GradeScaleFields({ max, onMax, rounding, onRounding, dp, onDp }) {
-  return (
-    <div className="space-y-2.5">
-      <div className="flex items-center gap-3">
-        <label className="text-sm text-gray-700 whitespace-nowrap w-28">Grade out of</label>
-        <input
-          type="number"
-          min="0"
-          step="any"
-          className="w-28 border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-          placeholder="e.g. 4"
-          value={max}
-          onChange={(e) => onMax(e.target.value)}
-        />
-        <span className="text-xs text-gray-400">leave blank to skip scaling</span>
-      </div>
-      <div className="flex items-center gap-3">
-        <label className="text-sm text-gray-700 whitespace-nowrap w-28">Rounding</label>
-        <select
-          className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-          value={rounding}
-          onChange={(e) => onRounding(e.target.value)}
-        >
-          <option value="none">No rounding (exact decimal)</option>
-          <option value="round">Round to nearest</option>
-          <option value="round_up">Always round up (ceiling)</option>
-          <option value="round_down">Always round down (floor)</option>
-          <option value="half">Nearest half-mark (e.g. 3 or 3.5)</option>
-        </select>
-      </div>
-      {rounding !== 'half' && (
-        <div className="flex items-center gap-3">
-          <label className="text-sm text-gray-700 whitespace-nowrap w-28">Decimal places</label>
-          <select
-            className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-            value={dp}
-            onChange={(e) => onDp(parseInt(e.target.value, 10))}
-          >
-            <option value={0}>0 — whole numbers only (e.g. 3)</option>
-            <option value={1}>1 — one decimal (e.g. 3.5)</option>
-            <option value={2}>2 — two decimals (e.g. 3.25)</option>
-          </select>
-        </div>
-      )}
-    </div>
-  )
-}
-
-function CombineTypeSection({ label, enabled, onToggle, maxN, onMaxN }) {
-  const inputCls = 'border border-gray-300 rounded-lg px-2.5 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500'
-  return (
-    <div className="space-y-2">
-      <label className="flex items-center gap-2 cursor-pointer select-none">
-        <input
-          type="checkbox"
-          className="w-4 h-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
-          checked={enabled}
-          onChange={(e) => onToggle(e.target.checked)}
-        />
-        <span className="text-sm text-gray-700">{label}</span>
-      </label>
-      {enabled && (
-        <div className="ml-6 space-y-1.5">
-          <div className="flex items-center gap-3">
-            <label className="text-xs text-gray-600 whitespace-nowrap">Max submissions counted:</label>
-            <input
-              type="number"
-              min="1"
-              step="1"
-              className={`w-20 ${inputCls}`}
-              placeholder="No limit"
-              value={maxN}
-              onChange={(e) => onMaxN(e.target.value)}
-            />
-          </div>
-          <p className="text-xs text-gray-400">
-            {maxN && parseInt(maxN, 10) > 0
-              ? `Expected ${maxN} submissions. Best ${maxN} scores count — submitting fewer reduces the grade (missing submissions score 0). Submitting more only helps.`
-              : 'No limit set — grade is the average of however many they submitted. No penalty for submitting fewer.'}
-          </p>
-        </div>
-      )}
-    </div>
-  )
-}
-
-function RubricBlock({ rubric, setRubric }) {
-  return (
-    <div className="space-y-3">
-      <RubricIngestUploader onRubricExtracted={setRubric} />
-      {!rubric && (
-        <>
-          <div className="flex items-center gap-3">
-            <div className="flex-1 h-px bg-gray-200" />
-            <span className="text-xs text-gray-400">or</span>
-            <div className="flex-1 h-px bg-gray-200" />
-          </div>
-          <button
-            type="button"
-            onClick={() => setRubric({ title: 'Rubric', criteria: [{ id: crypto.randomUUID(), name: 'Criterion 1', weight_percentage: 100, levels: [{ id: crypto.randomUUID(), title: 'High', points: 10, description: '' }, { id: crypto.randomUUID(), title: 'Low', points: 0, description: '' }] }] })}
-            className="w-full py-2 text-sm text-indigo-600 border border-dashed border-indigo-300 rounded-lg hover:bg-indigo-50 transition-colors"
-          >
-            + Create rubric from scratch
-          </button>
-        </>
-      )}
-      <RubricEditor rubric={rubric} onChange={setRubric} />
-    </div>
-  )
-}
+import {
+  ButtonGroup,
+  FeedbackFormatPicker,
+  LinkToggle,
+  RubricBlock,
+  MARKING_MODES,
+  AI_MODELS,
+} from '../components/AssignmentShared'
 
 export default function AssignmentFormPage() {
   const { id: classId } = useParams()
@@ -205,38 +18,24 @@ export default function AssignmentFormPage() {
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
   const [assignmentType, setAssignmentType] = useState('')
-  const [sameRubric, setSameRubric] = useState(true)
-  const [sameNotes, setSameNotes] = useState(true)
-  const [sameAttachments, setSameAttachments] = useState(true)
   const [rubric, setRubric] = useState(null)
   const [moderationRubric, setModerationRubric] = useState(null)
-  const [strictness, setStrictness] = useState('standard')
+  const [sameRubric, setSameRubric] = useState(true)
   const [additionalNotes, setAdditionalNotes] = useState('')
   const [moderationNotes, setModerationNotes] = useState('')
+  const [sameNotes, setSameNotes] = useState(true)
   const [markingMode, setMarkingMode] = useState('teacher_supervised_ai')
   const [aiModel, setAiModel] = useState('haiku')
-  const [responseDetail, setResponseDetail] = useState('standard')
+  const [feedbackFormat, setFeedbackFormat] = useState('')
   const [useTopicAttachments, setUseTopicAttachments] = useState(false)
   const [topicAttachmentInstructions, setTopicAttachmentInstructions] = useState('')
-  const [moderationTopicAttachmentInstructions, setModerationTopicAttachmentInstructions] = useState('')
-  const [gradeScaleEnabled, setGradeScaleEnabled] = useState(false)
-  const [gradeScaleMax, setGradeScaleMax] = useState('')
-  const [gradeRounding, setGradeRounding] = useState('none')
-  const [gradeDecimalPlaces, setGradeDecimalPlaces] = useState(2)
-  const [separateModerationGradeScale, setSeparateModerationGradeScale] = useState(false)
-  const [moderationGradeScaleMax, setModerationGradeScaleMax] = useState('')
-  const [moderationGradeRounding, setModerationGradeRounding] = useState('none')
-  const [moderationGradeDecimalPlaces, setModerationGradeDecimalPlaces] = useState(2)
-  const [combineResourceGrades, setCombineResourceGrades] = useState(false)
-  const [combineModerationGrades, setCombineModerationGrades] = useState(false)
-  const [combineResourceMaxN, setCombineResourceMaxN] = useState('')
-  const [combineModerationMaxN, setCombineModerationMaxN] = useState('')
-  const [combineScope, setCombineScope] = useState('topic')
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
 
   const inputCls = 'w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500'
   const isRnM = assignmentType === 'resources_and_moderations'
+  const rubricLinked = !isRnM || sameRubric
+  const notesLinked = !isRnM || sameNotes
 
   async function handleSubmit(e) {
     e.preventDefault()
@@ -250,36 +49,20 @@ export default function AssignmentFormPage() {
         description: description.trim(),
         marking_criteria: '',
         assignment_type: assignmentType,
-        strictness,
         additional_notes: additionalNotes.trim(),
-        same_rubric_for_moderation: !isRnM || sameRubric,
-        same_ai_options_for_moderation: !isRnM || sameNotes,
-        moderation_strictness: null,
-        moderation_additional_notes: isRnM && !sameNotes ? moderationNotes.trim() : null,
+        moderation_additional_notes: !notesLinked ? moderationNotes.trim() : null,
+        same_rubric_for_moderation: rubricLinked,
+        same_ai_options_for_moderation: notesLinked,
         marking_mode: markingMode,
         ai_model: aiModel,
-        response_detail: responseDetail,
+        feedback_format: feedbackFormat.trim(),
         use_topic_attachments: useTopicAttachments,
         topic_attachment_instructions: topicAttachmentInstructions.trim(),
-        moderation_topic_attachment_instructions: isRnM && !sameAttachments ? moderationTopicAttachmentInstructions.trim() : '',
-        grade_scale_enabled: gradeScaleEnabled,
-        grade_scale_max: gradeScaleEnabled && gradeScaleMax !== '' ? parseFloat(gradeScaleMax) : null,
-        grade_rounding: gradeRounding,
-        grade_decimal_places: gradeDecimalPlaces,
-        separate_moderation_grade_scale: gradeScaleEnabled && isRnM && separateModerationGradeScale,
-        moderation_grade_scale_max: gradeScaleEnabled && isRnM && separateModerationGradeScale && moderationGradeScaleMax !== '' ? parseFloat(moderationGradeScaleMax) : null,
-        moderation_grade_rounding: moderationGradeRounding,
-        moderation_grade_decimal_places: moderationGradeDecimalPlaces,
-        combine_resource_grades: combineResourceGrades,
-        combine_moderation_grades: combineModerationGrades,
-        combine_resource_max_n: combineResourceGrades && combineResourceMaxN !== '' ? parseInt(combineResourceMaxN, 10) : null,
-        combine_moderation_max_n: combineModerationGrades && combineModerationMaxN !== '' ? parseInt(combineModerationMaxN, 10) : null,
-        combine_scope: combineScope,
       })
       if (rubric) {
         await api.saveRubric(classId, assignment.id, {
           rubric,
-          moderation_rubric: isRnM && !sameRubric ? moderationRubric : null,
+          moderation_rubric: !rubricLinked ? moderationRubric : null,
         })
       }
       navigate(`/classes/${classId}/assignments/${assignment.id}`)
@@ -311,12 +94,21 @@ export default function AssignmentFormPage() {
 
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Title</label>
-              <input className={inputCls} value={title} onChange={(e) => setTitle(e.target.value)} />
+              <input
+                className={inputCls}
+                value={title}
+                onChange={(e) => setTitle(e.target.value)}
+              />
             </div>
 
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
-              <textarea className={inputCls} rows={3} value={description} onChange={(e) => setDescription(e.target.value)} />
+              <textarea
+                className={inputCls}
+                rows={3}
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+              />
             </div>
 
             <div>
@@ -328,7 +120,6 @@ export default function AssignmentFormPage() {
                   setAssignmentType(e.target.value)
                   setSameRubric(true)
                   setSameNotes(true)
-                  setSameAttachments(true)
                 }}
               >
                 <option value="" disabled>-- Select assignment type --</option>
@@ -337,9 +128,9 @@ export default function AssignmentFormPage() {
               </select>
             </div>
 
-            {/* Rubric */}
-            <div className="border-t border-gray-100 pt-4">
-              <div className="flex items-center gap-1.5 mb-3">
+            {/* ── Rubric ── */}
+            <div className="border-t border-gray-100 pt-4 space-y-3">
+              <div className="flex items-center gap-2">
                 <p className="text-sm font-medium text-gray-700">Rubric</p>
                 {isRnM && (
                   <LinkToggle
@@ -350,14 +141,15 @@ export default function AssignmentFormPage() {
                   />
                 )}
               </div>
-              {isRnM && !sameRubric ? (
-                <div className="space-y-6">
+
+              {!rubricLinked ? (
+                <div className="space-y-4">
                   <div>
-                    <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">Resources</p>
+                    <p className="text-xs font-medium text-gray-500 mb-2">Resources</p>
                     <RubricBlock rubric={rubric} setRubric={setRubric} />
                   </div>
-                  <div className="border-t border-gray-100 pt-5">
-                    <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">Moderations</p>
+                  <div>
+                    <p className="text-xs font-medium text-gray-500 mb-2">Moderations</p>
                     <RubricBlock rubric={moderationRubric} setRubric={setModerationRubric} />
                   </div>
                 </div>
@@ -366,9 +158,9 @@ export default function AssignmentFormPage() {
               )}
             </div>
 
-            {/* Additional notes */}
+            {/* ── Additional Notes ── */}
             <div className="border-t border-gray-100 pt-4">
-              {isRnM && !sameNotes ? (
+              {!notesLinked ? (
                 <div className="grid grid-cols-2 gap-6">
                   <div>
                     <div className="flex items-center gap-1.5 mb-1">
@@ -380,7 +172,7 @@ export default function AssignmentFormPage() {
                         unlinkedTip="Using separate notes — click to share the same notes for both"
                       />
                     </div>
-                    <p className="text-xs text-gray-500 mb-1">Resources</p>
+                    <p className="text-xs text-gray-400 mb-1">Resources</p>
                     <textarea
                       className={inputCls}
                       rows={4}
@@ -391,7 +183,7 @@ export default function AssignmentFormPage() {
                   </div>
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">&nbsp;</label>
-                    <p className="text-xs text-gray-500 mb-1">Moderations</p>
+                    <p className="text-xs text-gray-400 mb-1">Moderations</p>
                     <textarea
                       className={inputCls}
                       rows={4}
@@ -425,7 +217,7 @@ export default function AssignmentFormPage() {
               )}
             </div>
 
-            {/* Topic Attachments */}
+            {/* ── Topic Attachments ── */}
             <div className="border border-gray-200 rounded-lg p-4 space-y-3">
               <label className="flex items-start gap-3 cursor-pointer select-none">
                 <input
@@ -444,64 +236,19 @@ export default function AssignmentFormPage() {
                 </div>
               </label>
               {useTopicAttachments && (
-                isRnM && !sameAttachments ? (
-                  <div className="grid grid-cols-2 gap-6">
-                    <div>
-                      <div className="flex items-center gap-1.5 mb-1">
-                        <label className="text-xs font-medium text-gray-700">Attachment instructions</label>
-                        <LinkToggle
-                          linked={false}
-                          onToggle={setSameAttachments}
-                          linkedTip=""
-                          unlinkedTip="Using separate instructions — click to share the same instructions for both"
-                        />
-                      </div>
-                      <p className="text-xs text-gray-400 mb-1">Resources</p>
-                      <textarea
-                        className={inputCls}
-                        rows={3}
-                        placeholder="e.g. The attached files are lecture slides. Use them to assess knowledge of key concepts."
-                        value={topicAttachmentInstructions}
-                        onChange={(e) => setTopicAttachmentInstructions(e.target.value)}
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs font-medium text-gray-700 mb-1">&nbsp;</label>
-                      <p className="text-xs text-gray-400 mb-1">Moderations</p>
-                      <textarea
-                        className={inputCls}
-                        rows={3}
-                        placeholder="e.g. Use the attached files as context when evaluating moderation submissions."
-                        value={moderationTopicAttachmentInstructions}
-                        onChange={(e) => setModerationTopicAttachmentInstructions(e.target.value)}
-                      />
-                    </div>
-                  </div>
-                ) : (
-                  <div>
-                    <div className="flex items-center gap-1.5 mb-1">
-                      <label className="text-xs font-medium text-gray-700">
-                        Attachment instructions
-                        <span className="ml-1 font-normal text-gray-400">— tell the AI what these files are and how to use them</span>
-                      </label>
-                      {isRnM && (
-                        <LinkToggle
-                          linked={true}
-                          onToggle={setSameAttachments}
-                          linkedTip="Instructions are shared with moderations — click to use separate instructions"
-                          unlinkedTip=""
-                        />
-                      )}
-                    </div>
-                    <textarea
-                      className={inputCls}
-                      rows={3}
-                      placeholder="e.g. The attached files are lecture slides for this topic. Use them to assess whether the student's submission demonstrates knowledge of the key concepts covered in class."
-                      value={topicAttachmentInstructions}
-                      onChange={(e) => setTopicAttachmentInstructions(e.target.value)}
-                    />
-                  </div>
-                )
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">
+                    Attachment instructions
+                    <span className="ml-1 font-normal text-gray-400">— tell the AI what these files are and how to use them</span>
+                  </label>
+                  <textarea
+                    className={inputCls}
+                    rows={3}
+                    placeholder="e.g. The attached files are lecture slides for this topic. Use them to assess whether the student's submission demonstrates knowledge of the key concepts covered in class."
+                    value={topicAttachmentInstructions}
+                    onChange={(e) => setTopicAttachmentInstructions(e.target.value)}
+                  />
+                </div>
               )}
             </div>
           </section>
@@ -511,130 +258,22 @@ export default function AssignmentFormPage() {
             <h2 className="font-semibold text-gray-800">AI Settings</h2>
             <ButtonGroup label="Marking mode" options={MARKING_MODES} value={markingMode} onChange={setMarkingMode} />
             <ButtonGroup label="AI Model" options={AI_MODELS} value={aiModel} onChange={setAiModel} />
-            <ButtonGroup label="Feedback Detail" options={RESPONSE_DETAILS} value={responseDetail} onChange={setResponseDetail} />
-            <ButtonGroup label="Strictness" options={STRICTNESS_OPTIONS} value={strictness} onChange={setStrictness} />
-          </section>
-
-          {/* ── Grade Output ── */}
-          <section className="bg-white border border-gray-200 rounded-xl p-5 space-y-4">
-            <h2 className="font-semibold text-gray-800">Grade Output</h2>
-
-            <label className="flex items-start gap-3 cursor-pointer select-none">
-              <input
-                type="checkbox"
-                className="mt-0.5 w-4 h-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
-                checked={gradeScaleEnabled}
-                onChange={(e) => setGradeScaleEnabled(e.target.checked)}
-              />
-              <div>
-                <span className="text-sm font-medium text-gray-800">Scale grades to a custom range</span>
-                <p className="text-xs text-gray-500 mt-0.5">
-                  Convert raw rubric scores to a target grade (e.g. out of 4, or out of 100 for a percentage).
-                </p>
-              </div>
-            </label>
-
-            {gradeScaleEnabled && (
-              <div className="ml-7 space-y-4 border-l-2 border-indigo-100 pl-4">
-                {isRnM && separateModerationGradeScale ? (
-                  <div className="grid grid-cols-2 gap-6">
-                    <div className="space-y-1">
-                      <div className="flex items-center gap-1.5">
-                        <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Resources</p>
-                      </div>
-                      <GradeScaleFields max={gradeScaleMax} onMax={setGradeScaleMax} rounding={gradeRounding} onRounding={setGradeRounding} dp={gradeDecimalPlaces} onDp={setGradeDecimalPlaces} />
-                    </div>
-                    <div className="space-y-1">
-                      <div className="flex items-center gap-1.5">
-                        <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Moderations</p>
-                        <LinkToggle
-                          linked={false}
-                          onToggle={(val) => setSeparateModerationGradeScale(!val)}
-                          linkedTip=""
-                          unlinkedTip="Using separate grade output — click to use identical settings for both"
-                        />
-                      </div>
-                      <GradeScaleFields max={moderationGradeScaleMax} onMax={setModerationGradeScaleMax} rounding={moderationGradeRounding} onRounding={setModerationGradeRounding} dp={moderationGradeDecimalPlaces} onDp={setModerationGradeDecimalPlaces} />
-                    </div>
-                  </div>
-                ) : (
-                  <div className="space-y-1">
-                    {isRnM && (
-                      <div className="flex items-center gap-1.5 mb-2">
-                        <p className="text-xs text-gray-500">Grade output</p>
-                        <LinkToggle
-                          linked={true}
-                          onToggle={(val) => setSeparateModerationGradeScale(!val)}
-                          linkedTip="Grade output is identical for Resources & Moderations — click to use separate settings"
-                          unlinkedTip=""
-                        />
-                      </div>
-                    )}
-                    <GradeScaleFields max={gradeScaleMax} onMax={setGradeScaleMax} rounding={gradeRounding} onRounding={setGradeRounding} dp={gradeDecimalPlaces} onDp={setGradeDecimalPlaces} />
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Combined student grades */}
-            <div className="border-t border-gray-100 pt-4 space-y-3">
-              <p className="text-sm font-medium text-gray-700">Combined student grade</p>
-              <p className="text-xs text-gray-500">
-                Show one overall grade per student, calculated across multiple submissions. Displayed alongside individual submission grades — not a replacement.
-              </p>
-
-              <CombineTypeSection
-                label="Resources"
-                enabled={combineResourceGrades}
-                onToggle={setCombineResourceGrades}
-                maxN={combineResourceMaxN}
-                onMaxN={setCombineResourceMaxN}
-              />
-
-              {isRnM && (
-                <CombineTypeSection
-                  label="Moderations"
-                  enabled={combineModerationGrades}
-                  onToggle={setCombineModerationGrades}
-                  maxN={combineModerationMaxN}
-                  onMaxN={setCombineModerationMaxN}
-                />
-              )}
-
-              {(combineResourceGrades || (isRnM && combineModerationGrades)) && (
-                <div className="pt-1 space-y-1.5">
-                  <p className="text-xs font-medium text-gray-700">Show combined grade:</p>
-                  <div className="flex gap-2">
-                    {[
-                      { value: 'topic', label: 'Per topic', desc: 'Separate combined grade for each topic' },
-                      { value: 'assignment', label: 'Whole assignment', desc: 'One combined grade across all topics' },
-                    ].map((opt) => {
-                      const active = combineScope === opt.value
-                      return (
-                        <button
-                          key={opt.value}
-                          type="button"
-                          onClick={() => setCombineScope(opt.value)}
-                          className={`flex-1 text-center px-3 py-2 rounded-lg border text-xs transition-colors ${
-                            active ? 'border-indigo-500 bg-indigo-50 ring-1 ring-indigo-500' : 'border-gray-300 hover:border-gray-400 hover:bg-gray-50'
-                          }`}
-                        >
-                          <span className={`block font-semibold ${active ? 'text-indigo-700' : 'text-gray-800'}`}>{opt.label}</span>
-                          <span className={`block mt-0.5 ${active ? 'text-indigo-600' : 'text-gray-500'}`}>{opt.desc}</span>
-                        </button>
-                      )
-                    })}
-                  </div>
-                </div>
-              )}
-            </div>
+            <FeedbackFormatPicker value={feedbackFormat} onChange={setFeedbackFormat} />
           </section>
 
           <div className="flex gap-3">
-            <button type="submit" disabled={saving} className="px-5 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50">
+            <button
+              type="submit"
+              disabled={saving}
+              className="px-5 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
+            >
               {saving ? 'Saving…' : 'Create Assignment'}
             </button>
-            <button type="button" onClick={() => navigate(-1)} className="px-5 py-2 text-sm text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50">
+            <button
+              type="button"
+              onClick={() => navigate(-1)}
+              className="px-5 py-2 text-sm text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50"
+            >
               Cancel
             </button>
           </div>

@@ -95,7 +95,20 @@ function RubricGroup({ group, onUpdate, onDelete, readOnly, onAddRow, onAddColum
   const { headerLevels, criteria } = group
   const [hoveredId, setHoveredId] = useState(null)
   const [hoveredLevelTitle, setHoveredLevelTitle] = useState(null)
+  const [hintOpen, setHintOpen] = useState(() => new Set())
   const footerRef = useRef(null)
+
+  function toggleHint(criterionId) {
+    setHintOpen((prev) => {
+      const next = new Set(prev)
+      if (next.has(criterionId)) {
+        next.delete(criterionId)
+      } else {
+        next.add(criterionId)
+      }
+      return next
+    })
+  }
 
   function keepFooterVisible(action) {
     action()
@@ -163,7 +176,9 @@ function RubricGroup({ group, onUpdate, onDelete, readOnly, onAddRow, onAddColum
         const isHovered = hoveredId === criterion.id
         const isLast = rowIdx === criteria.length - 1
         const sortedLevels = [...criterion.levels].sort((a, b) => b.points - a.points)
-        const borderB = isLast ? '' : 'border-b border-gray-200'
+        const hasHint = !!criterion.ai_hint?.trim()
+        const hintVisible = hintOpen.has(criterion.id) || hasHint
+        const borderB = isLast && !hintVisible ? '' : 'border-b border-gray-200'
         const rowBg = isHovered ? 'bg-blue-50' : ''
 
         return (
@@ -192,6 +207,25 @@ function RubricGroup({ group, onUpdate, onDelete, readOnly, onAddRow, onAddColum
               {!readOnly && (
                 <button
                   type="button"
+                  onClick={() => {
+                    if (hintVisible && !hasHint) {
+                      toggleHint(criterion.id)
+                    } else if (hintVisible && hasHint) {
+                      onUpdate({ ...criterion, ai_hint: '' })
+                      setHintOpen((prev) => { const n = new Set(prev); n.delete(criterion.id); return n })
+                    } else {
+                      toggleHint(criterion.id)
+                    }
+                  }}
+                  className="text-xs text-indigo-400 hover:text-indigo-600 mt-0.5 text-left"
+                  title={hintVisible ? 'Remove AI hint' : 'Add AI hint'}
+                >
+                  {hintVisible ? 'AI hint ✕' : '+ AI hint'}
+                </button>
+              )}
+              {!readOnly && (
+                <button
+                  type="button"
                   onClick={() => onDelete(criterion.id)}
                   className={`absolute top-2 right-2 text-gray-400 hover:text-red-500 text-xs transition-opacity ${isHovered ? 'opacity-100' : 'opacity-0'}`}
                   title="Remove criterion"
@@ -215,6 +249,26 @@ function RubricGroup({ group, onUpdate, onDelete, readOnly, onAddRow, onAddColum
                 />
               </div>
             ))}
+
+            {/* Full-width AI hint row */}
+            {hintVisible && (
+              <div
+                style={{ gridColumn: '1 / -1' }}
+                className="px-4 py-2 bg-indigo-50 border-b border-indigo-100"
+              >
+                <p className="text-xs font-medium text-indigo-500 mb-1">AI grading hint <span className="font-normal text-indigo-400">(hidden from students)</span></p>
+                {readOnly
+                  ? <p className="text-sm text-gray-600">{criterion.ai_hint}</p>
+                  : <textarea
+                      className="w-full text-sm text-gray-700 bg-transparent focus:outline-none resize-none placeholder-gray-300"
+                      rows={2}
+                      placeholder="e.g. Make sure to check whether the student referenced X…"
+                      value={criterion.ai_hint ?? ''}
+                      onChange={(e) => onUpdate({ ...criterion, ai_hint: e.target.value })}
+                    />
+                }
+              </div>
+            )}
           </Fragment>
         )
       })}
@@ -284,7 +338,7 @@ function RubricGroup({ group, onUpdate, onDelete, readOnly, onAddRow, onAddColum
 // RubricEditor
 // ---------------------------------------------------------------------------
 
-export default function RubricEditor({ rubric, onChange, readOnly = false }) {
+export default function RubricEditor({ rubric, onChange, readOnly = false, onDelete }) {
   const { warnings } = useMemo(
     () => (rubric ? validateRubric(rubric) : { errors: [], warnings: [] }),
     [rubric]
@@ -409,6 +463,15 @@ export default function RubricEditor({ rubric, onChange, readOnly = false }) {
           className="text-lg font-bold text-gray-800"
           placeholder="Rubric title"
         />
+        {!readOnly && onDelete && (
+          <button
+            type="button"
+            onClick={onDelete}
+            className="ml-auto text-xs text-red-400 hover:text-red-600 border border-red-200 hover:border-red-400 px-2 py-0.5 rounded transition-colors"
+          >
+            Delete Rubric
+          </button>
+        )}
       </div>
 
       {/* Validation warnings */}

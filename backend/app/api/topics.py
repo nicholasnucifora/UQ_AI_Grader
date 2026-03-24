@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from app.api.classes import _require_class_teacher
 from app.core.database import get_db
 from app.models.assignment import Assignment
-from app.models.ripple import RippleResource
+from app.models.ripple import RippleModeration, RippleResource
 from app.models.topic import TopicAttachment
 from app.models.user import User
 from app.services.auth_service import get_current_user
@@ -41,13 +41,47 @@ def list_topics(
         .filter(RippleResource.assignment_id == assignment_id)
         .all()
     )
-    topic_counts: dict[str, int] = {}
+    # Build resource_id → topic lookup and count resources per topic
+    resource_topic: dict[str, str] = {}
+    topic_resource_counts: dict[str, int] = {}
     for r in resources:
         topic = r.topics.strip() or "(no topic)"
-        topic_counts[topic] = topic_counts.get(topic, 0) + 1
+        resource_topic[r.resource_id] = topic
+        topic_resource_counts[topic] = topic_resource_counts.get(topic, 0) + 1
 
+    # Count moderations per topic by resolving resource_id → topic
+    moderations = (
+        db.query(RippleModeration)
+        .filter(RippleModeration.assignment_id == assignment_id)
+        .all()
+    )
+    topic_moderation_counts: dict[str, int] = {}
+    for m in moderations:
+        topic = resource_topic.get(m.resource_id)
+        if topic:
+            topic_moderation_counts[topic] = topic_moderation_counts.get(topic, 0) + 1
+
+    # Count attachments per topic
+    attachment_rows = (
+        db.query(TopicAttachment.topic)
+        .filter(TopicAttachment.assignment_id == assignment_id)
+        .all()
+    )
+    topic_attachment_counts: dict[str, int] = {}
+    for (topic,) in attachment_rows:
+        topic_attachment_counts[topic] = topic_attachment_counts.get(topic, 0) + 1
+
+    all_topics = set(topic_resource_counts) | set(topic_moderation_counts)
     return sorted(
-        [{"topic": t, "resource_count": c} for t, c in topic_counts.items()],
+        [
+            {
+                "topic": t,
+                "resource_count": topic_resource_counts.get(t, 0),
+                "moderation_count": topic_moderation_counts.get(t, 0),
+                "attachment_count": topic_attachment_counts.get(t, 0),
+            }
+            for t in all_topics
+        ],
         key=lambda x: x["topic"],
     )
 
