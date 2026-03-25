@@ -83,7 +83,7 @@ export const HTML_PROSE =
 // Grade scaling helpers
 // ---------------------------------------------------------------------------
 
-function computeMaxPoints(rubric) {
+export function computeMaxPoints(rubric) {
   if (!rubric) return 0
   return (rubric.criteria ?? []).reduce((sum, c) => {
     const levels = c.levels ?? []
@@ -149,7 +149,7 @@ function getEffectiveAssignment(assignment, resultType) {
 //   maxN null  → No limit. Simple average of all submitted.
 //
 // isComplete = all submitted submissions are graded (we only show the final grade when fully done).
-function computeStudentCombined(submissions, maxN, maxPossible, assignment, useTeacher, resultType) {
+export function computeStudentCombined(submissions, maxN, maxPossible, assignment, useTeacher, resultType) {
   const effectiveAssignment = getEffectiveAssignment(assignment, resultType)
   const total = submissions.length
   if (total === 0) return null

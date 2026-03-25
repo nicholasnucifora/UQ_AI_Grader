@@ -1,10 +1,10 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useParams, Link, useNavigate } from 'react-router-dom'
 import Layout from '../components/Layout'
 import SubmitAssignmentModal from '../components/SubmitAssignmentModal'
 import { useAuth } from '../contexts/AuthContext'
 import { api } from '../api/client'
-import { StudentGradeTable, TeacherGradingPanel } from '../components/Marking'
+import { StudentGradeTable, TeacherGradingPanel, computeMaxPoints, computeStudentCombined } from '../components/Marking'
 
 export default function AssignmentPage() {
   const { id: classId, aid: assignmentId } = useParams()
@@ -19,6 +19,8 @@ export default function AssignmentPage() {
   const [rippleStats, setRippleStats] = useState(null)
   const [rippleImporting, setRippleImporting] = useState(false)
   const [rippleMessage, setRippleMessage] = useState(null)
+  const newCsvKey = `hasNewCsvData:${classId}:${assignmentId}`
+  const [hasNewCsvData, setHasNewCsvData] = useState(() => localStorage.getItem(newCsvKey) === 'true')
   const [rippleSkippedDetails, setRippleSkippedDetails] = useState([])
   const [showSkippedDetails, setShowSkippedDetails] = useState(false)
   const [clearingAiGrades, setClearingAiGrades] = useState(false)
@@ -34,6 +36,9 @@ export default function AssignmentPage() {
   // Topics
   const [topics, setTopics] = useState([])
   const [className, setClassName] = useState(null)
+  const [exportSortOrder, setExportSortOrder] = useState('surname_asc')
+  const [exportMenuOpen, setExportMenuOpen] = useState(false)
+  const exportMenuRef = useRef(null)
 
   useEffect(() => {
     let cancelled = false
@@ -130,6 +135,102 @@ export default function AssignmentPage() {
     }
   }
 
+  function handleExportAiGrades() {
+    if (!gradeResults || gradeResults.length === 0) return
+    const resourceRubric = rubricData?.rubric ?? null
+    const moderationRubric = rubricData?.moderation_rubric ?? null
+    const maxPossibleResource = computeMaxPoints(resourceRubric)
+    const maxPossibleModeration = computeMaxPoints(moderationRubric ?? resourceRubric)
+    const isRnM = assignment?.assignment_type === 'resources_and_moderations'
+
+    // Build per-student data
+    const studentMap = new Map()
+    for (const r of gradeResults) {
+      if (r.result_type === 'resource' && r.primary_author_id) {
+        if (!studentMap.has(r.primary_author_id))
+          studentMap.set(r.primary_author_id, { id: r.primary_author_id, name: r.primary_author_name, resources: [], moderations: [] })
+        studentMap.get(r.primary_author_id).resources.push(r)
+      }
+      if (r.result_type === 'moderation' && r.moderation_user_id) {
+        if (!studentMap.has(r.moderation_user_id))
+          studentMap.set(r.moderation_user_id, { id: r.moderation_user_id, name: r.moderation_user_name || null, resources: [], moderations: [] })
+        studentMap.get(r.moderation_user_id).moderations.push(r)
+      }
+    }
+
+    let rows = [...studentMap.values()].map((s) => {
+      const resAi = computeStudentCombined(s.resources, assignment?.combine_resource_max_n ?? null, maxPossibleResource, assignment, false, 'resource')
+      const resTeacher = computeStudentCombined(s.resources, assignment?.combine_resource_max_n ?? null, maxPossibleResource, assignment, true, 'resource')
+      const modAi = isRnM ? computeStudentCombined(s.moderations, assignment?.combine_moderation_max_n ?? null, maxPossibleModeration, assignment, false, 'moderation') : null
+      const modTeacher = isRnM ? computeStudentCombined(s.moderations, assignment?.combine_moderation_max_n ?? null, maxPossibleModeration, assignment, true, 'moderation') : null
+      const resAiGrade = resAi?.grade ?? null
+      const modAiGrade = modAi?.grade ?? null
+      // Overall = sum of available AI grades (null treated as absent, not 0)
+      const overallAiGrade = resAiGrade !== null || modAiGrade !== null
+        ? (resAiGrade ?? 0) + (modAiGrade ?? 0)
+        : null
+      return {
+        ...s,
+        resAiGrade,
+        resTeacherGrade: resTeacher?.grade ?? null,
+        modAiGrade,
+        modTeacherGrade: modTeacher?.grade ?? null,
+        overallAiGrade,
+      }
+    })
+
+    function getSurname(name) {
+      if (!name) return ''
+      const parts = name.trim().split(/\s+/)
+      return parts[parts.length - 1].toLowerCase()
+    }
+
+    switch (exportSortOrder) {
+      case 'surname_asc':
+        rows.sort((a, b) => getSurname(a.name).localeCompare(getSurname(b.name)))
+        break
+      case 'surname_desc':
+        rows.sort((a, b) => getSurname(b.name).localeCompare(getSurname(a.name)))
+        break
+      case 'student_id_asc':
+        rows.sort((a, b) => (a.id || '').localeCompare(b.id || ''))
+        break
+      case 'overall_desc':
+        rows.sort((a, b) => (b.overallAiGrade ?? -Infinity) - (a.overallAiGrade ?? -Infinity))
+        break
+      case 'overall_asc':
+        rows.sort((a, b) => (a.overallAiGrade ?? Infinity) - (b.overallAiGrade ?? Infinity))
+        break
+    }
+
+    const headers = ['Student Name', 'Student ID', 'Overall AI Grade', 'Resource AI Grade']
+    if (isRnM) headers.push('Moderation AI Grade')
+    headers.push('Resource Teacher Grade')
+    if (isRnM) headers.push('Moderation Teacher Grade')
+
+    const csvRows = [headers, ...rows.map((s) => {
+      const row = [
+        s.name || s.id || '',
+        s.id || '',
+        s.overallAiGrade !== null ? s.overallAiGrade : '',
+        s.resAiGrade !== null ? s.resAiGrade : '',
+      ]
+      if (isRnM) row.push(s.modAiGrade !== null ? s.modAiGrade : '')
+      row.push(s.resTeacherGrade !== null ? s.resTeacherGrade : '')
+      if (isRnM) row.push(s.modTeacherGrade !== null ? s.modTeacherGrade : '')
+      return row
+    })]
+
+    const csvContent = csvRows.map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n')
+    const blob = new Blob([csvContent], { type: 'text/csv' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `ai_grades_${(assignment?.name || 'export').replace(/[^a-z0-9]/gi, '_')}.csv`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
   async function handleRippleCsvUpload(e) {
     const file = e.target.files?.[0]
     if (!file) return
@@ -148,6 +249,7 @@ export default function AssignmentPage() {
         const label = result.type === 'resource' ? 'Resource' : 'Moderation'
         setRippleMessage({ ok: true, text: `${label} export — ${result.imported} new records added`, skipped: result.skipped })
         setRippleSkippedDetails(result.skipped_details || [])
+        if (result.imported > 0) { localStorage.setItem(newCsvKey, 'true'); setHasNewCsvData(true) }
         api.getRippleStats(classId, assignmentId).then(setRippleStats).catch(() => {})
         api.getTopics(classId, assignmentId).then(setTopics).catch(() => {})
       }
@@ -186,6 +288,8 @@ export default function AssignmentPage() {
   async function handleStartGrading() {
     setGradingError(null)
     setStartingGrading(true)
+    localStorage.removeItem(newCsvKey)
+    setHasNewCsvData(false)
     try {
       const job = await api.startGrading(classId, assignmentId)
       setGradeJob(job)
@@ -386,6 +490,53 @@ export default function AssignmentPage() {
                     Clear Data
                   </button>
                 )}
+                {gradeResults && gradeResults.length > 0 && (
+                  <div className="relative" ref={exportMenuRef}>
+                    <button
+                      onClick={() => setExportMenuOpen((o) => !o)}
+                      className="px-3 py-1.5 text-sm rounded-lg border border-emerald-300 text-emerald-700 hover:bg-emerald-50 flex items-center gap-1.5"
+                    >
+                      Export AI Grades
+                      <span className="text-xs opacity-60">{exportMenuOpen ? '▲' : '▼'}</span>
+                    </button>
+                    {exportMenuOpen && (
+                      <>
+                        {/* Backdrop to close on outside click */}
+                        <div className="fixed inset-0 z-10" onClick={() => setExportMenuOpen(false)} />
+                        <div className="absolute right-0 top-full mt-1 bg-white border border-gray-200 rounded-xl shadow-lg p-3 z-20 w-52">
+                          <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Sort order</p>
+                          <div className="space-y-1.5 mb-3">
+                            {[
+                              { value: 'surname_asc', label: 'Surname A→Z' },
+                              { value: 'surname_desc', label: 'Surname Z→A' },
+                              { value: 'student_id_asc', label: 'Student ID A→Z' },
+                              { value: 'overall_desc', label: 'Overall Grade High→Low' },
+                              { value: 'overall_asc', label: 'Overall Grade Low→High' },
+                            ].map((opt) => (
+                              <label key={opt.value} className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                                <input
+                                  type="radio"
+                                  name="exportSort"
+                                  value={opt.value}
+                                  checked={exportSortOrder === opt.value}
+                                  onChange={() => setExportSortOrder(opt.value)}
+                                  className="accent-emerald-600"
+                                />
+                                {opt.label}
+                              </label>
+                            ))}
+                          </div>
+                          <button
+                            onClick={() => { handleExportAiGrades(); setExportMenuOpen(false) }}
+                            className="w-full px-3 py-1.5 text-sm rounded-lg bg-emerald-600 text-white hover:bg-emerald-700"
+                          >
+                            Export
+                          </button>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )}
                 <label className={`px-3 py-1.5 text-sm rounded-lg cursor-pointer ${
                   rippleImporting
                     ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
@@ -430,7 +581,13 @@ export default function AssignmentPage() {
             onEmailStudentAll={handleEmailStudentAll}
             onEmailStudentTopic={handleEmailStudentTopic}
             emailDomain={user?.student_email_domain || ''}
+            hasNewCsvData={hasNewCsvData}
           />
+        )}
+
+        {/* Statistics — teacher only, shown when grading is complete */}
+        {isTeacher && gradeReport && (
+          <StatisticsSection gradeReport={gradeReport} />
         )}
 
         {/* Topics — teacher only */}
@@ -563,6 +720,7 @@ function GradingSection({
   onEmailStudentAll,
   onEmailStudentTopic,
   emailDomain,
+  hasNewCsvData,
 }) {
   const navigate = useNavigate()
   const [sectionOpen, setSectionOpen] = useState(false)
@@ -769,11 +927,11 @@ function GradingSection({
               </div>
             )}
 
-            {/* Complete — re-run for new data */}
-            {isComplete && (
-              <div className="flex items-center justify-between mb-4">
-                <span className="text-sm text-gray-500">
-                  Imported new CSV data? Re-run to grade ungraded submissions.
+            {/* Complete — re-run for new data (only when new records were actually imported) */}
+            {isComplete && hasNewCsvData && (
+              <div className="flex items-center justify-between mb-4 px-3 py-2 bg-indigo-50 border border-indigo-200 rounded-lg">
+                <span className="text-sm text-indigo-700 font-medium">
+                  New CSV data uploaded — grade new submissions whenever you're ready.
                 </span>
                 <button
                   onClick={() => navigate(`/classes/${classId}/assignments/${assignmentId}/grading-setup?mode=new_submissions`)}
@@ -803,15 +961,6 @@ function GradingSection({
                   resourceRubric={resourceRubric}
                   moderationRubric={moderationRubric}
                 />
-                {gradeReport && (
-                  <div className="mt-6 space-y-6">
-                    <CriterionDifficultyChart data={gradeReport.criterion_difficulty} />
-                    <TopicBreakdownTable data={gradeReport.topic_breakdown} />
-                    {gradeReport.moderation_criterion_difficulty?.length > 0 && (
-                      <CriterionDifficultyChart data={gradeReport.moderation_criterion_difficulty} />
-                    )}
-                  </div>
-                )}
               </>
             )}
           </div>
@@ -831,6 +980,37 @@ function GradingSection({
         )}
       </div>
         </>
+      )}
+    </section>
+  )
+}
+
+function StatisticsSection({ gradeReport }) {
+  const [open, setOpen] = useState(false)
+  const hasData =
+    gradeReport.criterion_difficulty?.length > 0 ||
+    gradeReport.topic_breakdown?.length > 0 ||
+    gradeReport.moderation_criterion_difficulty?.length > 0
+
+  if (!hasData) return null
+
+  return (
+    <section className="bg-white border border-gray-200 rounded-xl mb-6 overflow-hidden">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="w-full flex items-center justify-between px-5 py-4 hover:bg-gray-50 transition-colors text-left"
+      >
+        <h2 className="font-semibold text-gray-800">Statistics</h2>
+        <span className="text-gray-400 text-sm">{open ? '▲' : '▼'}</span>
+      </button>
+      {open && (
+        <div className="px-5 pb-5 space-y-6">
+          <CriterionDifficultyChart data={gradeReport.criterion_difficulty} />
+          <TopicBreakdownTable data={gradeReport.topic_breakdown} />
+          {gradeReport.moderation_criterion_difficulty?.length > 0 && (
+            <CriterionDifficultyChart data={gradeReport.moderation_criterion_difficulty} />
+          )}
+        </div>
       )}
     </section>
   )

@@ -2,10 +2,11 @@
  * Shared constants and components used by both AssignmentFormPage (create)
  * and AssignmentEditPage (edit). Editing this file affects both pages.
  */
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import RubricIngestUploader from './RubricIngestUploader'
 import RubricEditor from './RubricEditor'
 import { api } from '../api/client'
+import { useUpload, useTopicUploads } from '../contexts/UploadContext'
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -277,13 +278,36 @@ export function TopicAttachmentManager({ classId, assignmentId, globalInstructio
   const [topics, setTopics] = useState([])
   const [attachmentsByTopic, setAttachmentsByTopic] = useState({})
   const [expanded, setExpanded] = useState(null)
-  const [uploading, setUploading] = useState(false)
   const [error, setError] = useState(null)
+  const { enqueueUpload, recentCompletions } = useUpload()
+  const seenCompletionIds = useRef(new Set())
 
   useEffect(() => {
     if (!classId || !assignmentId) return
     api.getTopics(classId, assignmentId).then(setTopics).catch(() => {})
   }, [classId, assignmentId])
+
+  // Apply completions from any page — ensures files that finished uploading
+  // while this component wasn't mounted still appear in the loaded list.
+  useEffect(() => {
+    const relevant = recentCompletions.filter(
+      (c) =>
+        !seenCompletionIds.current.has(c.completionId) &&
+        String(c.classId) === String(classId) &&
+        String(c.assignmentId) === String(assignmentId)
+    )
+    if (relevant.length === 0) return
+    relevant.forEach((c) => seenCompletionIds.current.add(c.completionId))
+    setAttachmentsByTopic((prev) => {
+      let next = prev
+      for (const { topic: t, added } of relevant) {
+        if (next[t] === undefined) continue // not yet fetched; will be fresh on expand
+        if (next[t].some((a) => a.id === added.id)) continue // already present
+        next = { ...next, [t]: [...next[t], added] }
+      }
+      return next
+    })
+  }, [recentCompletions, classId, assignmentId])
 
   function toggleExpand(topic) {
     const next = expanded === topic ? null : topic
@@ -295,23 +319,15 @@ export function TopicAttachmentManager({ classId, assignmentId, globalInstructio
     }
   }
 
-  async function handleUpload(topic, file) {
-    setUploading(true)
+  function handleUpload(topic, file) {
     setError(null)
-    const formData = new FormData()
-    formData.append('file', file)
-    try {
-      const added = await api.uploadTopicAttachment(classId, assignmentId, topic, formData)
+    enqueueUpload(classId, assignmentId, topic, file, (added) => {
       setAttachmentsByTopic((prev) => {
         const next = { ...prev, [topic]: [...(prev[topic] ?? []), added] }
         onAttachmentsChange?.(topic, next[topic])
         return next
       })
-    } catch (err) {
-      setError(err.message)
-    } finally {
-      setUploading(false)
-    }
+    })
   }
 
   async function handleDelete(topic, attachmentId) {
@@ -340,102 +356,139 @@ export function TopicAttachmentManager({ classId, assignmentId, globalInstructio
     <div className="mt-4 space-y-2">
       <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Topics</p>
       {error && <p className="text-xs text-red-500">{error}</p>}
-      {topics.map(({ topic, resource_count }) => {
-        const isOpen = expanded === topic
-        const atts = attachmentsByTopic[topic]
-        const overridden = isOverridden(topic)
-        return (
-          <div key={topic} className="border border-gray-200 rounded-lg overflow-hidden">
-            <button
-              type="button"
-              onClick={() => toggleExpand(topic)}
-              className="w-full flex items-center justify-between px-4 py-2.5 hover:bg-gray-50 transition-colors text-left"
-            >
-              <div className="flex items-center gap-2.5 flex-wrap">
-                <span className="text-sm font-medium text-gray-800">{topic}</span>
-                <span className="text-xs text-gray-400">{resource_count} resource{resource_count !== 1 ? 's' : ''}</span>
-                {atts && atts.length > 0 && (
-                  <span className="text-xs bg-indigo-50 text-indigo-600 px-1.5 py-0.5 rounded-full">
-                    {atts.length} file{atts.length !== 1 ? 's' : ''}
-                  </span>
-                )}
-                {overridden && (
-                  <span className="text-xs bg-amber-50 text-amber-600 px-1.5 py-0.5 rounded-full">custom instructions</span>
-                )}
-              </div>
-              <span className="text-gray-400 text-xs shrink-0 ml-2">{isOpen ? '▲' : '▼'}</span>
-            </button>
+      {topics.map(({ topic, resource_count }) => (
+        <TopicRow
+          key={topic}
+          topic={topic}
+          resourceCount={resource_count}
+          isOpen={expanded === topic}
+          atts={attachmentsByTopic[topic]}
+          overridden={isOverridden(topic)}
+          overrideValue={overrides[topic] ?? ''}
+          globalInstruction={globalInstruction}
+          classId={classId}
+          assignmentId={assignmentId}
+          onToggle={() => toggleExpand(topic)}
+          onOverrideChange={(val) => {
+            if (val) {
+              onOverrideChange({ ...overrides, [topic]: val })
+            } else {
+              const next = { ...overrides }
+              delete next[topic]
+              onOverrideChange(next)
+            }
+          }}
+          onUpload={(file) => handleUpload(topic, file)}
+          onDelete={(id) => handleDelete(topic, id)}
+        />
+      ))}
+    </div>
+  )
+}
 
-            {isOpen && (
-              <div className="border-t border-gray-100 px-4 py-3 space-y-4 bg-gray-50/40">
-                {/* Per-topic instruction override */}
-                <div>
-                  <span className="block text-xs font-medium text-gray-600 mb-0.5">Topic-specific attachment instructions</span>
-                  <p className="text-xs text-gray-400 mb-1.5">Explain what the separate files for this topic represent and any specific instructions for the AI — e.g. lecture slides, case studies, or reference materials relevant to this topic only.</p>
-                  <textarea
-                    rows={3}
-                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                    placeholder={globalInstruction ? `Default: "${globalInstruction}"` : 'e.g. The attached file is the lecture for this topic — use it to assess topic-specific knowledge.'}
-                    value={overrides[topic] ?? ''}
-                    onChange={(e) => {
-                      const val = e.target.value
-                      if (val) {
-                        onOverrideChange({ ...overrides, [topic]: val })
-                      } else {
-                        const next = { ...overrides }
-                        delete next[topic]
-                        onOverrideChange(next)
-                      }
-                    }}
-                  />
-                </div>
+function TopicRow({
+  topic, resourceCount, isOpen, atts, overridden,
+  overrideValue, globalInstruction, classId, assignmentId,
+  onToggle, onOverrideChange, onUpload, onDelete,
+}) {
+  const { abortUpload } = useUpload()
+  const pendingUploads = useTopicUploads(classId, assignmentId, topic)
 
-                {/* Attachments */}
-                <div>
-                  <p className="text-xs font-medium text-gray-600 mb-2">Files</p>
-                  {atts === undefined ? (
-                    <p className="text-xs text-gray-400">Loading…</p>
-                  ) : atts.length === 0 ? (
-                    <p className="text-xs text-gray-400 mb-2">No files uploaded yet.</p>
-                  ) : (
-                    <ul className="space-y-1.5 mb-2">
-                      {atts.map((a) => (
-                        <li key={a.id} className="flex items-center justify-between text-xs bg-white border border-gray-200 rounded px-3 py-1.5">
-                          <span className="text-gray-700 truncate mr-3">{a.filename}</span>
-                          <button
-                            type="button"
-                            onClick={() => handleDelete(topic, a.id)}
-                            className="text-red-400 hover:text-red-600 shrink-0"
-                          >
-                            Remove
-                          </button>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                  <label className={`inline-flex items-center gap-2 px-2.5 py-1 text-xs rounded-lg cursor-pointer ${
-                    uploading ? 'bg-gray-100 text-gray-400 cursor-not-allowed' : 'bg-indigo-600 text-white hover:bg-indigo-700'
-                  }`}>
-                    {uploading ? 'Uploading…' : 'Upload File'}
-                    <input
-                      type="file"
-                      accept=".pdf,.txt,.docx,.png,.jpg,.jpeg"
-                      className="hidden"
-                      disabled={uploading}
-                      onChange={(e) => {
-                        const file = e.target.files?.[0]
-                        if (!file) return
-                        e.target.value = ''
-                        handleUpload(topic, file)
-                      }}
-                    />
-                  </label>
-                </div>
-              </div>
-            )}
+  return (
+    <div className="border border-gray-200 rounded-lg overflow-hidden">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="w-full flex items-center justify-between px-4 py-2.5 hover:bg-gray-50 transition-colors text-left"
+      >
+        <div className="flex items-center gap-2.5 flex-wrap">
+          <span className="text-sm font-medium text-gray-800">{topic}</span>
+          <span className="text-xs text-gray-400">{resourceCount} resource{resourceCount !== 1 ? 's' : ''}</span>
+          {atts && atts.length > 0 && (
+            <span className="text-xs bg-indigo-50 text-indigo-600 px-1.5 py-0.5 rounded-full">
+              {atts.length} file{atts.length !== 1 ? 's' : ''}
+            </span>
+          )}
+          {overridden && (
+            <span className="text-xs bg-amber-50 text-amber-600 px-1.5 py-0.5 rounded-full">custom instructions</span>
+          )}
+        </div>
+        <span className="text-gray-400 text-xs shrink-0 ml-2">{isOpen ? '▲' : '▼'}</span>
+      </button>
+
+      {isOpen && (
+        <div className="border-t border-gray-100 px-4 py-3 space-y-4 bg-gray-50/40">
+          {/* Per-topic instruction override */}
+          <div>
+            <span className="block text-xs font-medium text-gray-600 mb-0.5">Topic-specific attachment instructions</span>
+            <p className="text-xs text-gray-400 mb-1.5">Explain what the separate files for this topic represent and any specific instructions for the AI — e.g. lecture slides, case studies, or reference materials relevant to this topic only.</p>
+            <textarea
+              rows={3}
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              placeholder={globalInstruction ? `Default: "${globalInstruction}"` : 'e.g. The attached file is the lecture for this topic — use it to assess topic-specific knowledge.'}
+              value={overrideValue}
+              onChange={(e) => onOverrideChange(e.target.value)}
+            />
           </div>
-        )
-      })}
+
+          {/* Attachments */}
+          <div>
+            <p className="text-xs font-medium text-gray-600 mb-2">Files</p>
+            {atts === undefined ? (
+              <p className="text-xs text-gray-400">Loading…</p>
+            ) : atts.length === 0 && pendingUploads.length === 0 ? (
+              <p className="text-xs text-gray-400 mb-2">No files uploaded yet.</p>
+            ) : (
+              <ul className="space-y-1.5 mb-2">
+                {(atts ?? []).map((a) => (
+                  <li key={a.id} className="flex items-center justify-between text-xs bg-white border border-gray-200 rounded px-3 py-1.5">
+                    <span className="text-gray-700 truncate mr-3">{a.filename}</span>
+                    <button
+                      type="button"
+                      onClick={() => onDelete(a.id)}
+                      className="text-red-400 hover:text-red-600 shrink-0"
+                    >
+                      Remove
+                    </button>
+                  </li>
+                ))}
+                {pendingUploads.map((u) => (
+                  <li key={u.id} className="flex items-center justify-between text-xs bg-white border border-gray-200 rounded px-3 py-1.5">
+                    <div className="flex items-center gap-2 text-gray-400 min-w-0 mr-3">
+                      <svg className="animate-spin h-3 w-3 shrink-0" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+                      </svg>
+                      <span className="truncate">{u.filename}</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => abortUpload(u.id)}
+                      className="text-red-400 hover:text-red-600 shrink-0"
+                    >
+                      Remove
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <label className="inline-flex items-center gap-2 px-2.5 py-1 text-xs rounded-lg cursor-pointer bg-indigo-600 text-white hover:bg-indigo-700">
+              Upload File
+              <input
+                type="file"
+                accept=".pdf,.txt,.docx,.png,.jpg,.jpeg"
+                className="hidden"
+                onChange={(e) => {
+                  const file = e.target.files?.[0]
+                  if (!file) return
+                  e.target.value = ''
+                  onUpload(file)
+                }}
+              />
+            </label>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

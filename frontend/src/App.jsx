@@ -1,5 +1,6 @@
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import { AuthProvider, useAuth } from './contexts/AuthContext'
+import { UploadProvider } from './contexts/UploadContext'
 import LoginPage from './pages/LoginPage'
 import DashboardPage from './pages/DashboardPage'
 import ClassPage from './pages/ClassPage'
@@ -38,7 +39,9 @@ export default function App() {
   return (
     <BrowserRouter>
       <AuthProvider>
-        <AppRoutes />
+        <UploadProvider>
+          <AppRoutes />
+        </UploadProvider>
       </AuthProvider>
     </BrowserRouter>
   )

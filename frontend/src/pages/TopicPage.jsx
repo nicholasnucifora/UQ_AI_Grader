@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import Layout from '../components/Layout'
 import { useAuth } from '../contexts/AuthContext'
+import { useUpload, useTopicUploads } from '../contexts/UploadContext'
 import { api } from '../api/client'
 import { StudentGradeTable, TeacherGradingPanel } from '../components/Marking'
 
@@ -15,8 +16,30 @@ export default function TopicPage() {
   const [allResults, setAllResults] = useState(null)
   const [attachments, setAttachments] = useState([])
   const [attachmentsOpen, setAttachmentsOpen] = useState(false)
-  const [uploading, setUploading] = useState(false)
   const [uploadError, setUploadError] = useState(null)
+  const { enqueueUpload, abortUpload, recentCompletions } = useUpload()
+  const pendingUploads = useTopicUploads(classId, assignmentId, topic)
+  const seenCompletionIds = useRef(new Set())
+
+  useEffect(() => {
+    const relevant = recentCompletions.filter(
+      (c) =>
+        !seenCompletionIds.current.has(c.completionId) &&
+        String(c.classId) === String(classId) &&
+        String(c.assignmentId) === String(assignmentId) &&
+        c.topic === topic
+    )
+    if (relevant.length === 0) return
+    relevant.forEach((c) => seenCompletionIds.current.add(c.completionId))
+    setAttachments((prev) => {
+      let next = prev
+      for (const { added } of relevant) {
+        if (next.some((a) => a.id === added.id)) continue
+        next = [...next, added]
+      }
+      return next
+    })
+  }, [recentCompletions, classId, assignmentId, topic])
   const [activeTab, setActiveTab] = useState('ai')
   const [saveError, setSaveError] = useState(null)
   const [startAtResultId, setStartAtResultId] = useState(null)
@@ -98,22 +121,14 @@ export default function TopicPage() {
     return api.openStudentGradeEmail(classId, assignmentId, studentId, { toEmail, topic: topicName })
   }
 
-  async function handleUploadAttachment(e) {
+  function handleUploadAttachment(e) {
     const file = e.target.files?.[0]
     if (!file) return
     e.target.value = ''
-    setUploading(true)
     setUploadError(null)
-    const formData = new FormData()
-    formData.append('file', file)
-    try {
-      const added = await api.uploadTopicAttachment(classId, assignmentId, topic, formData)
+    enqueueUpload(classId, assignmentId, topic, file, (added) => {
       setAttachments((prev) => [...prev, added])
-    } catch (err) {
-      setUploadError(err.message)
-    } finally {
-      setUploading(false)
-    }
+    })
   }
 
   async function handleDeleteAttachment(attachmentId) {
@@ -177,7 +192,7 @@ export default function TopicPage() {
                   <p className="text-sm text-red-600 mb-3">{uploadError}</p>
                 )}
 
-                {attachments.length > 0 && (
+                {(attachments.length > 0 || pendingUploads.length > 0) && (
                   <ul className="space-y-2 mb-4">
                     {attachments.map((a) => (
                       <li key={a.id} className="flex items-center justify-between text-sm bg-gray-50 border border-gray-200 rounded-lg px-3 py-2">
@@ -190,18 +205,32 @@ export default function TopicPage() {
                         </button>
                       </li>
                     ))}
+                    {pendingUploads.map((u) => (
+                      <li key={u.id} className="flex items-center justify-between text-sm bg-gray-50 border border-gray-200 rounded-lg px-3 py-2">
+                        <div className="flex items-center gap-2.5 text-gray-400 min-w-0 mr-4">
+                          <svg className="animate-spin h-3.5 w-3.5 shrink-0" fill="none" viewBox="0 0 24 24">
+                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+                          </svg>
+                          <span className="truncate">{u.filename}</span>
+                        </div>
+                        <button
+                          onClick={() => abortUpload(u.id)}
+                          className="text-red-400 hover:text-red-600 shrink-0 text-xs"
+                        >
+                          Remove
+                        </button>
+                      </li>
+                    ))}
                   </ul>
                 )}
 
-                <label className={`inline-flex items-center gap-2 px-3 py-1.5 text-sm rounded-lg cursor-pointer ${
-                  uploading ? 'bg-gray-100 text-gray-400 cursor-not-allowed' : 'bg-indigo-600 text-white hover:bg-indigo-700'
-                }`}>
-                  {uploading ? 'Uploading…' : 'Upload File'}
+                <label className="inline-flex items-center gap-2 px-3 py-1.5 text-sm rounded-lg cursor-pointer bg-indigo-600 text-white hover:bg-indigo-700">
+                  Upload File
                   <input
                     type="file"
                     accept=".pdf,.txt,.docx,.png,.jpg,.jpeg"
                     className="hidden"
-                    disabled={uploading}
                     onChange={handleUploadAttachment}
                   />
                 </label>

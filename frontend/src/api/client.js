@@ -146,11 +146,12 @@ export const api = {
     request(`/classes/${classId}/assignments/${assignmentId}/topics`),
   getTopicAttachments: (classId, assignmentId, topic) =>
     request(`/classes/${classId}/assignments/${assignmentId}/topics/${encodeURIComponent(topic)}/attachments`),
-  uploadTopicAttachment: (classId, assignmentId, topic, formData) =>
+  uploadTopicAttachment: (classId, assignmentId, topic, formData, signal) =>
     request(`/classes/${classId}/assignments/${assignmentId}/topics/${encodeURIComponent(topic)}/attachments`, {
       method: 'POST',
       headers: {},
       body: formData,
+      ...(signal ? { signal } : {}),
     }),
   deleteTopicAttachment: (classId, assignmentId, topic, attachmentId) =>
     request(`/classes/${classId}/assignments/${assignmentId}/topics/${encodeURIComponent(topic)}/attachments/${attachmentId}`, {
