@@ -91,7 +91,7 @@ export function computeMaxPoints(rubric) {
   }, 0)
 }
 
-function applyScaling(rawScore, maxPossible, assignment) {
+export function applyScaling(rawScore, maxPossible, assignment) {
   if (!assignment?.grade_scale_enabled || !assignment?.grade_scale_max || maxPossible <= 0) return null
   const scaled = (rawScore / maxPossible) * assignment.grade_scale_max
   const dp = assignment.grade_decimal_places ?? 2
@@ -124,7 +124,7 @@ function formatScaled(scaled, assignment) {
 // Returns an assignment-like object with the correct scale settings for the given result type.
 // For moderation results where separate_moderation_grade_scale is enabled, substitutes the
 // moderation-specific fields so applyScaling/formatScaled use the right values.
-function getEffectiveAssignment(assignment, resultType) {
+export function getEffectiveAssignment(assignment, resultType) {
   if (
     resultType === 'moderation' &&
     assignment?.separate_moderation_grade_scale &&
@@ -223,7 +223,7 @@ function IconChevron({ open }) {
   )
 }
 
-function SubmissionRow({ result: r, onEmailIndividual, onGradeNow, assignment, maxPossible }) {
+function SubmissionRow({ result: r, onEmailIndividual, onGradeNow, assignment, maxPossible, indent }) {
   const aiRaw = (r.criterion_grades ?? []).reduce((s, g) => s + (g.points_awarded || 0), 0)
   const teacherRaw = r.teacher_criterion_grades
     ? r.teacher_criterion_grades.reduce((s, g) => s + (g.points_awarded || 0), 0)
@@ -234,17 +234,32 @@ function SubmissionRow({ result: r, onEmailIndividual, onGradeNow, assignment, m
   const scaledTeacher = teacherRaw !== null ? applyScaling(teacherRaw, maxPossible, effectiveAssignment) : null
   const isScaling = effectiveAssignment?.grade_scale_enabled && effectiveAssignment?.grade_scale_max
 
+  const needsModeration = r.resource_status === 'Needs Moderation'
+  const isRemoved = r.resource_status === 'Removed'
+
   return (
     <tr className="hover:bg-gray-50/60 transition-colors">
-      <td className="px-4 py-3 font-mono text-sm text-gray-700">
-        {r.resource_id}
-        {r.resource_status && r.resource_status !== 'Approved' && (
-          <span className={`ml-2 text-xs font-sans font-medium px-1.5 py-0.5 rounded-full ${
-            r.resource_status === 'Needs Moderation' ? 'bg-amber-100 text-amber-700' :
-            r.resource_status === 'Removed' ? 'bg-red-100 text-red-600' :
-            'bg-gray-100 text-gray-500'
-          }`}>{r.resource_status}</span>
+      <td className={`font-mono text-sm ${indent ? 'pl-6 pr-4 py-3' : 'px-4 py-3'} text-gray-700`}>
+        {needsModeration ? (
+          <span className="bg-amber-100 text-amber-800 rounded px-1 cursor-default" title="Resource needs moderation">
+            {r.resource_id}
+          </span>
+        ) : isRemoved ? (
+          <span className="bg-red-100 text-red-700 rounded px-1 cursor-default" title="Resource has been removed">
+            {r.resource_id}
+          </span>
+        ) : (
+          r.resource_id
         )}
+      </td>
+      <td className="px-4 py-3 text-sm text-center">
+        <span className={`inline-block text-xs font-medium px-2 py-0.5 rounded ${
+          r.result_type === 'moderation'
+            ? 'bg-amber-50 text-amber-700'
+            : 'bg-slate-100 text-slate-600'
+        }`}>
+          {r.result_type === 'moderation' ? 'Moderation' : 'Resource'}
+        </span>
       </td>
       <td className="px-4 py-3 text-sm text-gray-800 tabular-nums text-center">
         {r.status === 'error' ? (
@@ -260,13 +275,6 @@ function SubmissionRow({ result: r, onEmailIndividual, onGradeNow, assignment, m
           <span className="text-gray-900 font-medium">
             {isScaling ? formatScaled(scaledTeacher, assignment) : teacherRaw.toFixed(1)}
           </span>
-        ) : onGradeNow ? (
-          <button
-            onClick={() => onGradeNow(r)}
-            className="px-2.5 py-1 text-xs rounded-md bg-white border border-gray-300 text-gray-600 hover:border-gray-400 hover:text-gray-800 transition-colors whitespace-nowrap"
-          >
-            Grade
-          </button>
         ) : (
           <span className="text-gray-300">—</span>
         )}
@@ -482,14 +490,6 @@ export function StudentGradeTable({ results, emailDomain, onEmail, onEmailAll, o
                   const topicKey = `${student.id}:${topic}`
                   const topicHasComplete = [...resources, ...moderations].some((r) => r.status === 'complete')
 
-                  // Compute per-topic combined grades for section row display
-                  const resSectionCombined = assignment?.combine_resource_grades
-                    ? getCombined(resources, assignment?.combine_resource_max_n ?? null, maxPossibleResource, 'resource')
-                    : null
-                  const modSectionCombined = assignment?.combine_moderation_grades
-                    ? getCombined(moderations, assignment?.combine_moderation_max_n ?? null, maxPossibleModeration, 'moderation')
-                    : null
-
                   return (
                     <div key={topic} className="bg-white border border-gray-200 rounded-xl overflow-hidden shadow-sm">
                       {/* Topic section header — hidden on topic-specific pages */}
@@ -515,33 +515,18 @@ export function StudentGradeTable({ results, emailDomain, onEmail, onEmailAll, o
                       <table className="w-full text-sm">
                         <thead>
                           <tr className="border-b border-gray-100">
-                            <th className="px-4 py-2.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Resource ID</th>
+                            <th className="px-4 py-2.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">ID</th>
+                            <th className="px-4 py-2.5 text-center text-xs font-semibold text-gray-500 uppercase tracking-wide">Type</th>
                             <th className="px-4 py-2.5 text-center text-xs font-semibold text-gray-500 uppercase tracking-wide">AI Score</th>
                             <th className="px-4 py-2.5 text-center text-xs font-semibold text-gray-500 uppercase tracking-wide">Teacher Score</th>
                             <th className="px-4 py-2.5 text-center text-xs font-semibold text-gray-500 uppercase tracking-wide">Actions</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-gray-50">
-                          {moderations.length > 0 && (
-                            <SectionHeaderRow
-                              label="Resources"
-                              combined={resSectionCombined}
-                              colSpan={4}
-                              colorClass="bg-slate-50 text-slate-500"
-                            />
-                          )}
                           {sortRows(resources).map((r) => (
                             <SubmissionRow key={r.id} result={r} onEmailIndividual={handleEmailIndividual} onGradeNow={onGradeNow} assignment={assignment} maxPossible={maxPossibleResource} />
                           ))}
-                          {moderations.length > 0 && (
-                            <SectionHeaderRow
-                              label="Moderations"
-                              combined={modSectionCombined}
-                              colSpan={4}
-                              colorClass="bg-amber-50/60 text-amber-600"
-                            />
-                          )}
-                          {moderations.length > 0 && sortRows(moderations).map((r) => (
+                          {sortRows(moderations).map((r) => (
                             <SubmissionRow key={r.id} result={r} onEmailIndividual={handleEmailIndividual} onGradeNow={onGradeNow} assignment={assignment} maxPossible={maxPossibleModeration} />
                           ))}
                         </tbody>
@@ -555,6 +540,378 @@ export function StudentGradeTable({ results, emailDomain, onEmail, onEmailAll, o
         )
       })}
     </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Student overview table — sortable summary row per student, expandable detail
+// ---------------------------------------------------------------------------
+
+function SortableHeader({ col, label, sortCol, sortDir, onSort, align = 'left' }) {
+  const active = sortCol === col
+  return (
+    <th
+      className={`px-4 py-3 text-xs font-semibold uppercase tracking-wide whitespace-nowrap cursor-pointer select-none hover:bg-gray-100 transition-colors ${
+        align === 'center' ? 'text-center' : 'text-left'
+      } ${active ? 'text-indigo-700 bg-indigo-50/60' : 'text-gray-600 bg-gray-50'}`}
+      onClick={() => onSort(col)}
+    >
+      <span className={`inline-flex items-center gap-1 ${align === 'center' ? 'justify-center w-full' : ''}`}>
+        {label}
+        <span className={`text-xs ${active ? 'opacity-80' : 'opacity-30'}`}>
+          {active ? (sortDir === 'asc' ? '↑' : '↓') : '↕'}
+        </span>
+      </span>
+    </th>
+  )
+}
+
+export function StudentOverviewTable({
+  results,
+  emailDomain,
+  onEmail,
+  onEmailAll,
+  onEmailTopic,
+  onGradeNow,
+  assignment,
+  resourceRubric,
+  moderationRubric,
+  topicFilter,
+}) {
+  const [sortCol, setSortCol] = useState('name')
+  const [sortDir, setSortDir] = useState('asc')
+  const [expandedStudentId, setExpandedStudentId] = useState(null)
+  const [emailingAll, setEmailingAll] = useState({})
+  const [emailingTopic, setEmailingTopic] = useState({})
+  const [emailError, setEmailError] = useState(null)
+  const [emailInfo, setEmailInfo] = useState(null)
+
+  const maxPossibleResource = computeMaxPoints(resourceRubric)
+  const maxPossibleModeration = computeMaxPoints(moderationRubric ?? resourceRubric)
+  const isRnM = assignment?.assignment_type === 'resources_and_moderations'
+
+  const students = useMemo(() => {
+    const map = new Map()
+    for (const r of results) {
+      if (r.result_type === 'resource' && r.primary_author_id) {
+        if (!map.has(r.primary_author_id))
+          map.set(r.primary_author_id, { id: r.primary_author_id, name: r.primary_author_name, resources: [], moderations: [] })
+        map.get(r.primary_author_id).resources.push(r)
+      }
+      if (r.result_type === 'moderation' && r.moderation_user_id) {
+        if (!map.has(r.moderation_user_id))
+          map.set(r.moderation_user_id, { id: r.moderation_user_id, name: r.moderation_user_name || null, resources: [], moderations: [] })
+        map.get(r.moderation_user_id).moderations.push(r)
+      }
+    }
+    return [...map.values()]
+  }, [results])
+
+  function getGrades(student) {
+    const resInfo = computeStudentCombined(student.resources, assignment?.combine_resource_max_n ?? null, maxPossibleResource, assignment, false, 'resource')
+    const resTeacher = computeStudentCombined(student.resources, assignment?.combine_resource_max_n ?? null, maxPossibleResource, assignment, true, 'resource')
+    const modInfo = isRnM ? computeStudentCombined(student.moderations, assignment?.combine_moderation_max_n ?? null, maxPossibleModeration, assignment, false, 'moderation') : null
+    const modTeacher = isRnM ? computeStudentCombined(student.moderations, assignment?.combine_moderation_max_n ?? null, maxPossibleModeration, assignment, true, 'moderation') : null
+    return { resInfo, resTeacher, modInfo, modTeacher }
+  }
+
+  function overallValue(resInfo, modInfo) {
+    const r = resInfo?.grade ?? null
+    const m = modInfo?.grade ?? null
+    if (r === null && m === null) return null
+    return (r ?? 0) + (m ?? 0)
+  }
+
+  function formatOverall(resInfo, modInfo) {
+    if (!isRnM) return formatCombinedGrade(resInfo) ?? '—'
+    const total = overallValue(resInfo, modInfo)
+    if (total === null) return '—'
+    const resEff = resInfo?.effectiveAssignment
+    const modEff = modInfo?.effectiveAssignment
+    const dp = Math.max(resEff?.grade_decimal_places ?? 1, 1)
+    if (resEff?.grade_scale_enabled && resEff?.grade_scale_max && modEff?.grade_scale_enabled && modEff?.grade_scale_max) {
+      return `${total.toFixed(dp)} / ${Number(resEff.grade_scale_max) + Number(modEff.grade_scale_max)}`
+    }
+    return total.toFixed(dp)
+  }
+
+  function handleSort(col) {
+    if (sortCol === col) {
+      setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'))
+    } else {
+      setSortCol(col)
+      setSortDir('asc')
+    }
+  }
+
+  const sortedStudents = useMemo(() => {
+    function getSurname(name) {
+      if (!name) return ''
+      const parts = name.trim().split(/\s+/)
+      return parts[parts.length - 1].toLowerCase()
+    }
+    return [...students].sort((a, b) => {
+      let cmp = 0
+      if (sortCol === 'name') {
+        cmp = getSurname(a.name || a.id).localeCompare(getSurname(b.name || b.id))
+      } else if (sortCol === 'id') {
+        cmp = (a.id || '').localeCompare(b.id || '')
+      } else if (sortCol === 'aiGrade') {
+        const ga = getGrades(a)
+        const gb = getGrades(b)
+        cmp = (overallValue(ga.resInfo, ga.modInfo) ?? -Infinity) - (overallValue(gb.resInfo, gb.modInfo) ?? -Infinity)
+      } else if (sortCol === 'teacherGrade') {
+        const ga = getGrades(a)
+        const gb = getGrades(b)
+        cmp = (overallValue(ga.resTeacher, ga.modTeacher) ?? -Infinity) - (overallValue(gb.resTeacher, gb.modTeacher) ?? -Infinity)
+      } else if (sortCol === 'submissions') {
+        cmp = (a.resources.length + a.moderations.length) - (b.resources.length + b.moderations.length)
+      }
+      return sortDir === 'asc' ? cmp : -cmp
+    })
+  }, [students, sortCol, sortDir, assignment, maxPossibleResource, maxPossibleModeration, isRnM])
+
+  function resolvedEmail(studentId) {
+    return emailDomain ? `${studentId}@${emailDomain}` : undefined
+  }
+
+  async function handleEmailRow(student) {
+    setEmailError(null)
+    setEmailInfo(null)
+    setEmailingAll((p) => ({ ...p, [student.id]: true }))
+    try {
+      const result = topicFilter
+        ? await onEmailTopic(student.id, topicFilter, resolvedEmail(student.id))
+        : await onEmailAll(student.id, resolvedEmail(student.id))
+      if (result?.clipboardFallback) setEmailInfo('Email body copied to clipboard — paste it into the email that just opened.')
+    } catch (err) {
+      setEmailError(err?.message || 'Failed to open email')
+    }
+    setEmailingAll((p) => ({ ...p, [student.id]: false }))
+  }
+
+  async function handleEmailTopicBtn(studentId, topic) {
+    setEmailError(null)
+    setEmailInfo(null)
+    const key = `${studentId}:${topic}`
+    setEmailingTopic((p) => ({ ...p, [key]: true }))
+    try {
+      const result = await onEmailTopic(studentId, topic, resolvedEmail(studentId))
+      if (result?.clipboardFallback) setEmailInfo('Email body copied to clipboard — paste it into the email that just opened.')
+    } catch (err) {
+      setEmailError(err?.message || 'Failed to open email')
+    }
+    setEmailingTopic((p) => ({ ...p, [key]: false }))
+  }
+
+  function handleEmailIndividual(r) {
+    const userId = r.result_type === 'resource' ? r.primary_author_id : r.moderation_user_id
+    const toEmail = emailDomain && userId ? `${userId}@${emailDomain}` : undefined
+    try { onEmail(r.id, toEmail) } catch {}
+  }
+
+  function groupByTopicLocal(studentResults) {
+    const topicMap = new Map()
+    for (const r of studentResults) {
+      const topic = (r.resource_topics ?? '').trim() || 'No Topic'
+      if (!topicMap.has(topic)) topicMap.set(topic, { resources: [], moderations: [] })
+      if (r.result_type === 'resource') topicMap.get(topic).resources.push(r)
+      else topicMap.get(topic).moderations.push(r)
+    }
+    return [...topicMap.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([topic, data]) => ({ topic, ...data }))
+  }
+
+  const sortRows = (arr) =>
+    [...arr].sort((a, b) => Number(a.resource_id) - Number(b.resource_id) || String(a.resource_id).localeCompare(String(b.resource_id)))
+
+  function getCombinedLocal(subs, maxN, maxPossible, resultType) {
+    return {
+      ai: computeStudentCombined(subs, maxN, maxPossible, assignment, false, resultType),
+      teacher: computeStudentCombined(subs, maxN, maxPossible, assignment, true, resultType),
+    }
+  }
+
+  if (students.length === 0) {
+    return <p className="text-sm text-gray-400 italic">No results yet.</p>
+  }
+
+  return (
+    <div>
+      {emailError && (
+        <div className="flex items-start justify-between bg-red-50 border border-red-200 rounded-lg px-4 py-2.5 mb-3 text-sm text-red-700">
+          <span>{emailError}</span>
+          <button onClick={() => setEmailError(null)} className="ml-3 text-red-400 hover:text-red-600 shrink-0">✕</button>
+        </div>
+      )}
+      {emailInfo && (
+        <div className="flex items-start justify-between bg-blue-50 border border-blue-200 rounded-lg px-4 py-2.5 mb-3 text-sm text-blue-700">
+          <span>{emailInfo}</span>
+          <button onClick={() => setEmailInfo(null)} className="ml-3 text-blue-400 hover:text-blue-600 shrink-0">✕</button>
+        </div>
+      )}
+      <div className="max-h-[65vh] overflow-y-auto rounded-xl border border-gray-200">
+        <table className="w-full text-sm table-fixed">
+          <colgroup>
+            <col style={{width: '22%'}} />
+            <col style={{width: '13%'}} />
+            <col style={{width: '17%'}} />
+            <col style={{width: '17%'}} />
+            <col style={{width: '11%'}} />
+            <col style={{width: '20%'}} />
+          </colgroup>
+          <thead className="sticky top-0 z-10">
+            <tr className="border-b border-gray-200">
+              <SortableHeader col="name" label="Student Name" sortCol={sortCol} sortDir={sortDir} onSort={handleSort} />
+              <SortableHeader col="id" label="Student ID" sortCol={sortCol} sortDir={sortDir} onSort={handleSort} />
+              <SortableHeader col="aiGrade" label="Overall AI Grade" sortCol={sortCol} sortDir={sortDir} onSort={handleSort} align="center" />
+              <SortableHeader col="teacherGrade" label="Overall Teacher Grade" sortCol={sortCol} sortDir={sortDir} onSort={handleSort} align="center" />
+              <SortableHeader col="submissions" label="Submissions" sortCol={sortCol} sortDir={sortDir} onSort={handleSort} align="center" />
+              <th className={`px-4 py-3 text-xs font-semibold uppercase tracking-wide text-gray-600 text-center whitespace-nowrap bg-gray-50`}>
+                {topicFilter ? `Email ${topicFilter}` : 'Email All Grades'}
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {sortedStudents.map((student) => {
+              const grades = getGrades(student)
+              const isExpanded = expandedStudentId === student.id
+              const hasComplete = [...student.resources, ...student.moderations].some((r) => r.status === 'complete')
+              const totalSubs = student.resources.length + student.moderations.length
+
+              return (
+                <Fragment key={student.id}>
+                  <tr
+                    className={`cursor-pointer select-none border-t border-gray-100 transition-colors ${
+                      isExpanded ? 'bg-indigo-50/40' : 'bg-white hover:bg-gray-50/70'
+                    }`}
+                    onClick={() => setExpandedStudentId(isExpanded ? null : student.id)}
+                  >
+                    <td className="px-4 py-3">
+                      <div className="flex items-center gap-2">
+                        <span className={`flex-shrink-0 transition-transform ${isExpanded ? 'text-indigo-600' : 'text-gray-400'}`}>
+                          <IconChevron open={isExpanded} />
+                        </span>
+                        <span className="font-medium text-gray-900">{student.name || student.id}</span>
+                      </div>
+                    </td>
+                    <td className="px-4 py-3 font-mono text-xs text-gray-500">{student.name ? student.id : '—'}</td>
+                    <td className="px-4 py-3 text-center tabular-nums text-gray-800">
+                      {formatOverall(grades.resInfo, grades.modInfo)}
+                    </td>
+                    <td className="px-4 py-3 text-center tabular-nums text-emerald-700 font-medium">
+                      {formatOverall(grades.resTeacher, grades.modTeacher)}
+                    </td>
+                    <td className="px-4 py-3 text-center text-gray-500">{totalSubs}</td>
+                    <td className="px-4 py-3 text-center" onClick={(e) => e.stopPropagation()}>
+                      {onEmailAll && (
+                        <button
+                          onClick={() => handleEmailRow(student)}
+                          disabled={emailingAll[student.id] || !hasComplete}
+                          className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-lg border border-gray-300 text-gray-600 bg-white hover:border-gray-400 hover:text-gray-800 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                        >
+                          <IconMail />
+                          {emailingAll[student.id] ? 'Sending…' : (topicFilter ? `Email ${topicFilter}` : 'Email All')}
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+
+                  {isExpanded && (
+                    <tr className="border-t border-gray-100">
+                      <td colSpan={6} className="px-5 py-4 bg-gray-50/50">
+                        <div className="rounded-xl border border-gray-200 overflow-hidden shadow-sm bg-white">
+                          <table className="w-full text-sm table-fixed">
+                            <colgroup>
+                              <col style={{width: '25%'}} />
+                              <col style={{width: '15%'}} />
+                              <col style={{width: '20%'}} />
+                              <col style={{width: '22%'}} />
+                              <col style={{width: '18%'}} />
+                            </colgroup>
+                            <thead>
+                              <tr className="border-b border-gray-200 bg-gray-50">
+                                <th className="px-4 py-2.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">ID</th>
+                                <th className="px-4 py-2.5 text-center text-xs font-semibold text-gray-500 uppercase tracking-wide">Type</th>
+                                <th className="px-4 py-2.5 text-center text-xs font-semibold text-gray-500 uppercase tracking-wide">AI Score</th>
+                                <th className="px-4 py-2.5 text-center text-xs font-semibold text-gray-500 uppercase tracking-wide">Teacher Score</th>
+                                <th className="px-4 py-2.5 text-center text-xs font-semibold text-gray-500 uppercase tracking-wide">Actions</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {groupByTopicLocal([...student.resources, ...student.moderations]).map(({ topic, resources, moderations }, topicIdx) => {
+                                const topicKey = `${student.id}:${topic}`
+                                const topicHasComplete = [...resources, ...moderations].some((r) => r.status === 'complete')
+                                const resSectionCombined = getCombinedLocal(resources, assignment?.combine_resource_max_n ?? null, maxPossibleResource, 'resource')
+                                const modSectionCombined = getCombinedLocal(moderations, assignment?.combine_moderation_max_n ?? null, maxPossibleModeration, 'moderation')
+                                return (
+                                  <Fragment key={topic}>
+                                    {/* Topic header row */}
+                                    <tr className={`bg-indigo-50/60 border-b border-gray-300 ${topicIdx > 0 ? 'border-t-2 border-gray-300' : ''}`}>
+                                      <td colSpan={4} className="px-4 py-2">
+                                        <div className="flex items-center gap-2 flex-wrap">
+                                          <span className="text-xs font-semibold text-indigo-800 uppercase tracking-wide">{topic}</span>
+                                          {(() => {
+                                            const resAi = formatCombinedGrade(resSectionCombined?.ai)
+                                            const modAi = formatCombinedGrade(modSectionCombined?.ai)
+                                            const resTeacher = formatCombinedGrade(resSectionCombined?.teacher)
+                                            const modTeacher = formatCombinedGrade(modSectionCombined?.teacher)
+                                            const dot = <span className="text-indigo-300 mx-0.5">·</span>
+                                            return (
+                                              <>
+                                                {!isRnM && resAi && <>{dot}<span className="text-xs text-indigo-600 font-medium">AI {resAi}</span></>}
+                                                {isRnM && resAi && <>{dot}<span className="text-xs text-indigo-600 font-medium">Resource {resAi}</span></>}
+                                                {isRnM && modAi && <>{dot}<span className="text-xs text-indigo-600 font-medium">Moderation {modAi}</span></>}
+                                                {!isRnM && resTeacher && <>{dot}<span className="text-xs text-emerald-700 font-medium">Teacher {resTeacher}</span></>}
+                                                {isRnM && resTeacher && <>{dot}<span className="text-xs text-emerald-700 font-medium">Res Teacher {resTeacher}</span></>}
+                                                {isRnM && modTeacher && <>{dot}<span className="text-xs text-emerald-700 font-medium">Mod Teacher {modTeacher}</span></>}
+                                              </>
+                                            )
+                                          })()}
+                                        </div>
+                                      </td>
+                                      <td className="px-3 py-2 text-center">
+                                        {onEmailTopic && (
+                                          <button
+                                            onClick={() => handleEmailTopicBtn(student.id, topic)}
+                                            disabled={emailingTopic[topicKey] || !topicHasComplete}
+                                            title={`Email ${topic}`}
+                                            className="inline-flex items-center justify-center p-2 rounded-md text-indigo-500 hover:text-indigo-700 hover:bg-indigo-100 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                                          >
+                                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-5 h-5">
+                                              <path strokeLinecap="round" strokeLinejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 01-2.25 2.25h-15a2.25 2.25 0 01-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0019.5 4.5h-15a2.25 2.25 0 00-2.25 2.25m19.5 0v.243a2.25 2.25 0 01-1.07 1.916l-7.5 4.615a2.25 2.25 0 01-2.36 0L3.32 8.91a2.25 2.25 0 01-1.07-1.916V6.75" />
+                                            </svg>
+                                          </button>
+                                        )}
+                                      </td>
+                                    </tr>
+
+                                    {/* Resource rows */}
+                                    {sortRows(resources).map((r) => (
+                                      <SubmissionRow key={r.id} result={r} onEmailIndividual={handleEmailIndividual} onGradeNow={onGradeNow} assignment={assignment} maxPossible={maxPossibleResource} indent />
+                                    ))}
+
+                                    {/* Moderation rows */}
+                                    {sortRows(moderations).map((r) => (
+                                      <SubmissionRow key={r.id} result={r} onEmailIndividual={handleEmailIndividual} onGradeNow={onGradeNow} assignment={assignment} maxPossible={maxPossibleModeration} indent />
+                                    ))}
+                                  </Fragment>
+                                )
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
     </div>
   )
 }
@@ -683,6 +1040,8 @@ export function GradeResultsTable({ results, type, expandedResult, setExpandedRe
                               </div>
                             ))}
                           </div>
+                        ) : r.status === 'error' ? (
+                          <p className="text-xs text-red-500">{r.error_message || 'Grading failed.'}</p>
                         ) : (
                           <p className="text-xs text-gray-400">No criteria</p>
                         )}
@@ -877,7 +1236,7 @@ export function TeacherGradingPanel({ resourceQueue, moderationQueue, resourceRu
           <p className="text-green-700 font-medium mb-1">
             All {gradedCount} {activeType === 'resource' ? 'resources' : 'moderations'} marked!
           </p>
-          <p className="text-sm text-gray-500">Switch to the AI Grading tab to review results.</p>
+          <p className="text-sm text-gray-500">Switch to the Grades tab to review results.</p>
         </div>
       )}
 

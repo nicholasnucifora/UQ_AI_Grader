@@ -1,10 +1,10 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, Link, useNavigate } from 'react-router-dom'
 import Layout from '../components/Layout'
 import SubmitAssignmentModal from '../components/SubmitAssignmentModal'
 import { useAuth } from '../contexts/AuthContext'
 import { api } from '../api/client'
-import { StudentGradeTable, TeacherGradingPanel, computeMaxPoints, computeStudentCombined } from '../components/Marking'
+import { StudentOverviewTable, TeacherGradingPanel, computeMaxPoints, computeStudentCombined, applyScaling, getEffectiveAssignment } from '../components/Marking'
 
 export default function AssignmentPage() {
   const { id: classId, aid: assignmentId } = useParams()
@@ -39,6 +39,10 @@ export default function AssignmentPage() {
   const [exportSortOrder, setExportSortOrder] = useState('surname_asc')
   const [exportMenuOpen, setExportMenuOpen] = useState(false)
   const exportMenuRef = useRef(null)
+  // Tab + filter state
+  const [activeMainTab, setActiveMainTab] = useState('grades') // 'grades' | 'marking' | 'statistics'
+  const [topicFilter, setTopicFilter] = useState(null)
+  const [startAtResultId, setStartAtResultId] = useState(null)
 
   useEffect(() => {
     let cancelled = false
@@ -71,9 +75,11 @@ export default function AssignmentPage() {
           .then((job) => {
             if (cancelled) return
             setGradeJob(job ?? null)
-            if (job?.status === 'complete') {
+            if (job) {
               api.getGradeResults(classId, assignmentId).then((d) => { if (!cancelled) setGradeResults(d) }).catch(() => {})
-              api.getGradeReport(classId, assignmentId).then((d) => { if (!cancelled) setGradeReport(d) }).catch(() => {})
+              if (job.status === 'complete') {
+                api.getGradeReport(classId, assignmentId).then((d) => { if (!cancelled) setGradeReport(d) }).catch(() => {})
+              }
             }
           })
           .catch(() => {})
@@ -268,6 +274,8 @@ export default function AssignmentPage() {
       if (gradeJob.status === 'complete') {
         api.getGradeResults(classId, assignmentId).then(setGradeResults).catch(() => {})
         api.getGradeReport(classId, assignmentId).then(setGradeReport).catch(() => {})
+        localStorage.removeItem(newCsvKey)
+        setHasNewCsvData(false)
       }
       return
     }
@@ -278,6 +286,10 @@ export default function AssignmentPage() {
           if (job && job.status === 'complete') {
             api.getGradeResults(classId, assignmentId).then(setGradeResults).catch(() => {})
             api.getGradeReport(classId, assignmentId).then(setGradeReport).catch(() => {})
+            localStorage.removeItem(newCsvKey)
+            setHasNewCsvData(false)
+          } else if (job && job.status === 'running') {
+            api.getGradeResults(classId, assignmentId).then(setGradeResults).catch(() => {})
           }
         })
         .catch(() => {})
@@ -317,10 +329,15 @@ export default function AssignmentPage() {
     try {
       await api.deleteGrading(classId, assignmentId)
       setGradeJob(null)
-      setGradeResults(null)
       setGradeReport(null)
-      setTeacherResQueue([])
-      setTeacherModQueue([])
+      // Only results from the cancelled run were deleted on the backend;
+      // refetch to show any remaining results from previous completed runs.
+      const remaining = await api.getGradeResults(classId, assignmentId).catch(() => [])
+      const remArr = remaining ?? []
+      setGradeResults(remArr.length > 0 ? remArr : null)
+      const { resource, moderation } = buildTeacherQueues(remArr)
+      setTeacherResQueue(resource)
+      setTeacherModQueue(moderation)
     } catch (err) {
       setGradingError(err.message)
     }
@@ -343,6 +360,13 @@ export default function AssignmentPage() {
     const { resource, moderation } = buildTeacherQueues(results ?? gradeResults)
     setTeacherResQueue(resource)
     setTeacherModQueue(moderation)
+  }
+
+  function handleGradeNow(result) {
+    handleOpenTeacherTab()
+    setActiveMainTab('marking')
+    setStartAtResultId(result.id)
+    window.scrollTo({ top: 0, behavior: 'smooth' })
   }
 
   async function handleEmailResult(resultId, toEmail) {
@@ -377,6 +401,35 @@ export default function AssignmentPage() {
 
   const isTeacher = myMemberRole === 'teacher'
   const mySubmission = submissions.find((s) => s.student_user_id === user?.user_id)
+
+  // Non-preview grading job
+  const activeGradeJob = gradeJob && !gradeJob.is_preview ? gradeJob : null
+  const status = activeGradeJob?.status
+  const isRnM = assignment.assignment_type === 'resources_and_moderations'
+  const isComplete = status === 'complete' && gradeResults && gradeResults.length > 0
+  const hasResources = rippleStats && rippleStats.resources > 0
+  const resourceResults = gradeResults?.filter((r) => r.result_type === 'resource') ?? []
+  const moderationResults = gradeResults?.filter((r) => r.result_type === 'moderation') ?? []
+  const resGradedCount = teacherResQueue.filter((r) => r.teacher_graded_at).length
+  const modGradedCount = teacherModQueue.filter((r) => r.teacher_graded_at).length
+
+  // Topic-filtered results for Grades tab
+  const filteredResults = topicFilter && gradeResults
+    ? gradeResults.filter((r) => (r.resource_topics ?? '').trim() === topicFilter)
+    : gradeResults
+
+  // Topic-filtered marking queues
+  const filteredTeacherResQueue = topicFilter
+    ? teacherResQueue.filter((r) => (r.resource_topics ?? '').trim() === topicFilter)
+    : teacherResQueue
+  const filteredTeacherModQueue = topicFilter
+    ? teacherModQueue.filter((r) => (r.resource_topics ?? '').trim() === topicFilter)
+    : teacherModQueue
+
+  // Topic-filtered breakdown for Statistics tab
+  const filteredTopicBreakdown = topicFilter && gradeReport?.topic_breakdown
+    ? gradeReport.topic_breakdown.filter((t) => t.topic === topicFilter)
+    : gradeReport?.topic_breakdown
 
   function handleSubmitted(submission) {
     setSubmissions((prev) => [...prev, submission])
@@ -425,8 +478,8 @@ export default function AssignmentPage() {
         {/* RiPPLE Data — teacher only */}
         {isTeacher && (
           <section className="bg-white border border-gray-200 rounded-xl p-5 mb-6">
-            <div className="flex items-center justify-between">
-              <div>
+            <div className="flex items-start justify-between gap-4">
+              <div className="min-w-0">
                 <h2 className="font-semibold text-gray-800">RiPPLE Data</h2>
                 {rippleStats && (
                   <p className="text-sm text-gray-500 mt-0.5">
@@ -462,9 +515,15 @@ export default function AssignmentPage() {
                     )}
                   </div>
                 )}
+                {gradingError && (
+                  <div className="flex items-start justify-between bg-red-50 border border-red-200 rounded-lg px-4 py-3 mt-2 text-sm text-red-700">
+                    <span>{gradingError}</span>
+                    <button onClick={() => setGradingError(null)} className="ml-3 text-red-400 hover:text-red-600 shrink-0">✕</button>
+                  </div>
+                )}
               </div>
-              <div className="flex items-center gap-2 shrink-0">
-                {gradeJob && !gradeJob.is_preview && (
+              <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">
+                {activeGradeJob && (
                   <button
                     onClick={handleClearAiGrades}
                     disabled={clearingAiGrades || rippleImporting}
@@ -501,7 +560,6 @@ export default function AssignmentPage() {
                     </button>
                     {exportMenuOpen && (
                       <>
-                        {/* Backdrop to close on outside click */}
                         <div className="fixed inset-0 z-10" onClick={() => setExportMenuOpen(false)} />
                         <div className="absolute right-0 top-full mt-1 bg-white border border-gray-200 rounded-xl shadow-lg p-3 z-20 w-52">
                           <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Sort order</p>
@@ -551,64 +609,249 @@ export default function AssignmentPage() {
                     onChange={handleRippleCsvUpload}
                   />
                 </label>
+                {/* Grade with AI — shown when no active job */}
+                {!activeGradeJob && (
+                  assignment.marking_mode === 'teacher_supervised_ai' ? (
+                    <button
+                      onClick={() => navigate(`/classes/${classId}/assignments/${assignmentId}/grading-setup`)}
+                      disabled={!hasResources || rippleImporting}
+                      className={`px-3 py-1.5 text-sm rounded-lg font-medium ${
+                        hasResources && !rippleImporting
+                          ? 'bg-violet-600 text-white hover:bg-violet-700'
+                          : 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                      }`}
+                    >
+                      Grade with AI
+                    </button>
+                  ) : (
+                    <button
+                      onClick={handleStartGrading}
+                      disabled={startingGrading || !hasResources || rippleImporting}
+                      className={`px-3 py-1.5 text-sm rounded-lg font-medium ${
+                        hasResources && !startingGrading && !rippleImporting
+                          ? 'bg-violet-600 text-white hover:bg-violet-700'
+                          : 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                      }`}
+                    >
+                      {startingGrading ? 'Starting…' : 'Grade with AI'}
+                    </button>
+                  )
+                )}
               </div>
             </div>
+
+            {/* Grade New Submissions banner */}
+            {isComplete && hasNewCsvData && (
+              <div className="flex items-center justify-between mt-4 px-3 py-2 bg-indigo-50 border border-indigo-200 rounded-lg">
+                <span className="text-sm text-indigo-700 font-medium">
+                  New CSV data uploaded — grade new submissions whenever you're ready.
+                </span>
+                <button
+                  onClick={() => navigate(`/classes/${classId}/assignments/${assignmentId}/grading-setup?mode=new_submissions`)}
+                  disabled={!hasResources}
+                  className={`px-3 py-1.5 text-sm rounded-lg shrink-0 ml-4 ${
+                    hasResources
+                      ? 'bg-indigo-600 text-white hover:bg-indigo-700'
+                      : 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                  }`}
+                >
+                  Grade New Submissions
+                </button>
+              </div>
+            )}
+
+            {/* Queued */}
+            {status === 'queued' && (
+              <p className="text-sm text-gray-500 mt-3">Queued — worker will pick this up shortly…</p>
+            )}
+
+            {/* Running — progress bar */}
+            {status === 'running' && (() => {
+              const resTotal = rippleStats?.resources ?? 0
+              const modTotal = rippleStats?.moderations ?? 0
+              const isIncremental = (resTotal + modTotal) > 0 && activeGradeJob.total < (resTotal + modTotal)
+              const pct = activeGradeJob.total > 0 ? Math.round((activeGradeJob.graded / activeGradeJob.total) * 100) : 0
+              const inPhase2 = !isIncremental && isRnM && resTotal > 0 && activeGradeJob.graded >= resTotal
+              const phaseGraded = inPhase2 ? activeGradeJob.graded - resTotal : activeGradeJob.graded
+              const phaseTotal = inPhase2 ? modTotal : (resTotal || activeGradeJob.total)
+              const phasePct = phaseTotal > 0 ? Math.round((phaseGraded / phaseTotal) * 100) : 0
+              return (
+                <div className="mt-4">
+                  <div className="flex items-center justify-between mb-1">
+                    <div className="text-sm text-gray-700">
+                      {isIncremental ? (
+                        <span>Grading new submissions <span className="font-medium">{activeGradeJob.graded} / {activeGradeJob.total}</span></span>
+                      ) : isRnM ? (
+                        inPhase2 ? (
+                          <span>
+                            <span className="text-emerald-600 font-medium">Resources done</span>
+                            {' — grading moderations '}
+                            <span className="font-medium">{phaseGraded} / {modTotal}</span>
+                          </span>
+                        ) : (
+                          <span>
+                            Grading resources{' '}
+                            <span className="font-medium">{phaseGraded} / {resTotal}</span>
+                            {modTotal > 0 && <span className="text-gray-400"> · then {modTotal} moderations</span>}
+                          </span>
+                        )
+                      ) : (
+                        <span>Grading… <span className="font-medium">{activeGradeJob.graded} / {activeGradeJob.total}</span></span>
+                      )}
+                    </div>
+                    <button
+                      onClick={handleCancelGrading}
+                      className="px-3 py-1 text-sm border border-gray-300 rounded-lg hover:bg-gray-50"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                  <div className="w-full bg-gray-200 rounded-full h-2">
+                    <div
+                      className="bg-indigo-500 h-2 rounded-full transition-all"
+                      style={{ width: `${isIncremental ? pct : phasePct}%` }}
+                    />
+                  </div>
+                </div>
+              )
+            })()}
+
+            {/* Cancelled / Error */}
+            {(status === 'cancelled' || status === 'error') && (
+              <div className="flex items-center gap-3 mt-3">
+                <span className="text-sm text-gray-500 capitalize">{status}</span>
+                <button
+                  onClick={handleDeleteGrading}
+                  className="px-3 py-1.5 text-sm border border-red-300 text-red-600 rounded-lg hover:bg-red-50"
+                >
+                  Remove New Grades
+                </button>
+              </div>
+            )}
           </section>
         )}
 
-        {/* Grading — teacher only */}
+        {/* Main grading tabs — teacher only */}
         {isTeacher && (
-          <GradingSection
-            classId={classId}
-            assignmentId={assignmentId}
-            rippleStats={rippleStats}
-            assignment={assignment}
-            gradeJob={gradeJob && !gradeJob.is_preview ? gradeJob : null}
-            gradeResults={gradeResults}
-            gradeReport={gradeReport}
-            gradingError={gradingError}
-            setGradingError={setGradingError}
-            startingGrading={startingGrading}
-            rubricData={rubricData}
-            teacherResQueue={teacherResQueue}
-            teacherModQueue={teacherModQueue}
-            onStart={handleStartGrading}
-            onCancel={handleCancelGrading}
-            onDelete={handleDeleteGrading}
-            onOpenTeacherTab={handleOpenTeacherTab}
-            onSaveTeacherGrade={handleSaveTeacherGrade}
-            onEmailResult={handleEmailResult}
-            onEmailStudentAll={handleEmailStudentAll}
-            onEmailStudentTopic={handleEmailStudentTopic}
-            emailDomain={user?.student_email_domain || ''}
-            hasNewCsvData={hasNewCsvData}
-          />
-        )}
+          <section className="bg-white border border-gray-200 rounded-xl mb-6 overflow-hidden">
+            {gradeResults && gradeResults.length > 0 ? (
+              <>
+                {/* Tab bar with topic filter on the right */}
+                <div className="flex items-center justify-between border-b border-gray-100 pr-4">
+                  <div className="flex">
+                    <TabButton active={activeMainTab === 'grades'} onClick={() => setActiveMainTab('grades')}>
+                      Grades
+                      {activeGradeJob && (
+                        <span className="ml-1.5 text-xs opacity-60">
+                          {isRnM
+                            ? `${resourceResults.length} res · ${moderationResults.length} mod`
+                            : activeGradeJob.graded}
+                        </span>
+                      )}
+                    </TabButton>
+                    <TabButton
+                      active={activeMainTab === 'marking'}
+                      onClick={() => { handleOpenTeacherTab(); setActiveMainTab('marking') }}
+                    >
+                      Marking
+                      <span className="ml-1.5 text-xs opacity-60">
+                        {resGradedCount}/{teacherResQueue.length}
+                        {isRnM && teacherModQueue.length > 0 && ` · ${modGradedCount}/${teacherModQueue.length}`}
+                      </span>
+                    </TabButton>
+                    <TabButton active={activeMainTab === 'statistics'} onClick={() => setActiveMainTab('statistics')}>
+                      Statistics
+                    </TabButton>
+                  </div>
+                  {topics.length > 1 && (
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-xs text-gray-400">Topic:</span>
+                      <button
+                        onClick={() => setTopicFilter(null)}
+                        className={`px-2.5 py-1 text-xs rounded-full border transition-colors ${
+                          !topicFilter
+                            ? 'bg-indigo-600 border-indigo-600 text-white'
+                            : 'border-gray-300 text-gray-500 hover:border-gray-400 hover:bg-gray-50'
+                        }`}
+                      >
+                        All
+                      </button>
+                      {topics.map(({ topic }) => (
+                        <button
+                          key={topic}
+                          onClick={() => setTopicFilter(topic)}
+                          className={`px-2.5 py-1 text-xs rounded-full border transition-colors ${
+                            topicFilter === topic
+                              ? 'bg-indigo-600 border-indigo-600 text-white'
+                              : 'border-gray-300 text-gray-500 hover:border-gray-400 hover:bg-gray-50'
+                          }`}
+                        >
+                          {topic}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
 
-        {/* Statistics — teacher only, shown when grading is complete */}
-        {isTeacher && gradeReport && (
-          <StatisticsSection gradeReport={gradeReport} />
-        )}
+                <div className="p-5">
+                  {/* Grades tab — always mounted to preserve table scroll/expand state */}
+                  <div className={activeMainTab !== 'grades' ? 'hidden' : ''}>
+                    <StudentOverviewTable
+                      results={filteredResults}
+                      emailDomain={user?.student_email_domain || ''}
+                      onEmail={handleEmailResult}
+                      onEmailAll={handleEmailStudentAll}
+                      onEmailTopic={handleEmailStudentTopic}
+                      onGradeNow={handleGradeNow}
+                      assignment={assignment}
+                      resourceRubric={rubricData?.rubric ?? null}
+                      moderationRubric={rubricData?.moderation_rubric ?? null}
+                      topicFilter={topicFilter}
+                    />
+                  </div>
 
-        {/* Topics — teacher only */}
-        {isTeacher && topics.length > 0 && (
-          <section className="bg-white border border-gray-200 rounded-xl p-5 mb-6">
-            <h2 className="font-semibold text-gray-800 mb-4">Topics</h2>
-            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
-              {topics.map(({ topic, resource_count, moderation_count }) => (
-                <Link
-                  key={topic}
-                  to={`/classes/${classId}/assignments/${assignmentId}/topics/${encodeURIComponent(topic)}`}
-                  className="flex flex-col gap-1 p-3 border border-gray-200 rounded-lg hover:border-indigo-300 hover:bg-indigo-50 transition-colors group"
-                >
-                  <span className="text-sm font-medium text-gray-800 group-hover:text-indigo-700 leading-snug">{topic}</span>
-                  <span className="text-xs text-gray-400">
-                    {resource_count} resource{resource_count !== 1 ? 's' : ''}
-                    {moderation_count > 0 && `, ${moderation_count} moderation${moderation_count !== 1 ? 's' : ''}`}
-                  </span>
-                </Link>
-              ))}
-            </div>
+                  {/* Marking tab — always mounted to preserve marking position */}
+                  <div className={activeMainTab !== 'marking' ? 'hidden' : ''}>
+                    <TeacherGradingPanel
+                      resourceQueue={filteredTeacherResQueue}
+                      moderationQueue={filteredTeacherModQueue}
+                      resourceRubric={rubricData?.rubric ?? null}
+                      moderationRubric={rubricData?.moderation_rubric ?? null}
+                      onSave={handleSaveTeacherGrade}
+                      isRnM={isRnM}
+                      startAtResultId={startAtResultId}
+                    />
+                  </div>
+
+                  {/* Statistics tab — always mounted */}
+                  <div className={activeMainTab !== 'statistics' ? 'hidden' : ''}>
+                    {gradeReport ? (
+                      <div className="space-y-6">
+                        <GradeDistributionChart
+                          results={filteredResults}
+                          assignment={assignment}
+                          resourceRubric={rubricData?.rubric ?? null}
+                          moderationRubric={rubricData?.moderation_rubric ?? null}
+                        />
+                        <CriterionDistributionChart
+                          results={filteredResults}
+                          assignment={assignment}
+                          resourceRubric={rubricData?.rubric ?? null}
+                          moderationRubric={rubricData?.moderation_rubric ?? null}
+                        />
+                        <TopicBreakdownTable data={filteredTopicBreakdown} />
+                      </div>
+                    ) : (
+                      <p className="text-sm text-gray-400 italic">Statistics will appear after grading completes.</p>
+                    )}
+                  </div>
+                </div>
+              </>
+            ) : (
+              <div className="p-5">
+                <p className="text-sm text-gray-400 italic">No grades yet — import a CSV and run AI grading above.</p>
+              </div>
+            )}
           </section>
         )}
 
@@ -693,329 +936,6 @@ function StudentSubmissionView({ submission }) {
   )
 }
 
-// ---------------------------------------------------------------------------
-// Grading section — tabbed: AI Grading | Teacher Marking
-// ---------------------------------------------------------------------------
-
-function GradingSection({
-  classId,
-  assignmentId,
-  rippleStats,
-  assignment,
-  gradeJob,
-  gradeResults,
-  gradeReport,
-  gradingError,
-  setGradingError,
-  startingGrading,
-  rubricData,
-  teacherResQueue,
-  teacherModQueue,
-  onStart,
-  onCancel,
-  onDelete,
-  onOpenTeacherTab,
-  onSaveTeacherGrade,
-  onEmailResult,
-  onEmailStudentAll,
-  onEmailStudentTopic,
-  emailDomain,
-  hasNewCsvData,
-}) {
-  const navigate = useNavigate()
-  const [sectionOpen, setSectionOpen] = useState(false)
-  const [activeTab, setActiveTab] = useState('ai') // 'ai' | 'teacher'
-  const [startAtResultId, setStartAtResultId] = useState(null)
-
-  function handleGradeNow(result) {
-    onOpenTeacherTab()
-    setActiveTab('teacher')
-    setStartAtResultId(result.id)
-  }
-
-  const hasResources = rippleStats && rippleStats.resources > 0
-  const status = gradeJob?.status
-  const isRnM = assignment.assignment_type === 'resources_and_moderations'
-  const isComplete = status === 'complete' && gradeResults && gradeResults.length > 0
-
-  const progressPct =
-    gradeJob && gradeJob.total > 0
-      ? Math.round((gradeJob.graded / gradeJob.total) * 100)
-      : 0
-
-  const resourceResults = gradeResults?.filter((r) => r.result_type === 'resource') ?? []
-  const moderationResults = gradeResults?.filter((r) => r.result_type === 'moderation') ?? []
-  const resGradedCount = teacherResQueue.filter((r) => r.teacher_graded_at).length
-  const modGradedCount = teacherModQueue.filter((r) => r.teacher_graded_at).length
-
-  const resourceRubric = rubricData?.rubric ?? null
-  const moderationRubric = rubricData?.moderation_rubric ?? null
-
-  function switchToTeacherTab() {
-    onOpenTeacherTab()
-    setActiveTab('teacher')
-  }
-
-  return (
-    <section className="bg-white border border-gray-200 rounded-xl mb-6 overflow-hidden">
-      {/* Section header — click to expand/collapse */}
-      <button
-        onClick={() => setSectionOpen((o) => !o)}
-        className="w-full flex items-center justify-between px-5 py-4 hover:bg-gray-50 transition-colors text-left"
-      >
-        <div className="flex items-center gap-3">
-          <h2 className="font-semibold text-gray-800">Overall Grading</h2>
-          {gradeJob && (
-            <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
-              status === 'complete' ? 'bg-green-100 text-green-700' :
-              status === 'running' ? 'bg-indigo-100 text-indigo-700' :
-              status === 'queued' ? 'bg-yellow-100 text-yellow-700' :
-              'bg-gray-100 text-gray-500'
-            }`}>
-              {status === 'complete'
-                ? isRnM
-                  ? `${resourceResults.length} resources · ${moderationResults.length} moderations`
-                  : `${gradeJob.graded} graded`
-                : status}
-            </span>
-          )}
-        </div>
-        <span className="text-gray-400 text-sm">{sectionOpen ? '▲' : '▼'}</span>
-      </button>
-
-      {sectionOpen && (
-        <>
-      {/* Tab bar — only shown when complete */}
-      {isComplete && (
-        <div className="flex border-b border-gray-100">
-          <TabButton active={activeTab === 'ai'} onClick={() => setActiveTab('ai')}>
-            AI Grading
-            <span className="ml-1.5 text-xs opacity-60">
-              {isRnM
-                ? `${resourceResults.length} res · ${moderationResults.length} mod`
-                : gradeJob.graded}
-            </span>
-          </TabButton>
-          <TabButton
-            active={activeTab === 'teacher'}
-            onClick={switchToTeacherTab}
-          >
-            Teacher Marking
-            <span className="ml-1.5 text-xs opacity-60">
-              {resGradedCount}/{teacherResQueue.length}
-              {isRnM && teacherModQueue.length > 0 && ` · ${modGradedCount}/${teacherModQueue.length}`}
-            </span>
-          </TabButton>
-        </div>
-      )}
-
-      <div className="p-5">
-        {/* Inline error */}
-        {gradingError && (
-          <div className="flex items-start justify-between bg-red-50 border border-red-200 rounded-lg px-4 py-3 mb-4 text-sm text-red-700">
-            <span>{gradingError}</span>
-            <button onClick={() => setGradingError(null)} className="ml-3 text-red-400 hover:text-red-600 shrink-0">✕</button>
-          </div>
-        )}
-
-        {/* ── AI tab (or pre-complete state) ── */}
-        {(!isComplete || activeTab === 'ai') && (
-          <div>
-            {/* No job yet */}
-            {!gradeJob && (
-              <div className="flex items-center gap-3">
-                {assignment.marking_mode === 'teacher_supervised_ai' ? (
-                  <button
-                    onClick={() => navigate(`/classes/${classId}/assignments/${assignmentId}/grading-setup`)}
-                    disabled={!hasResources}
-                    className={`px-3 py-1.5 text-sm rounded-lg ${
-                      hasResources
-                        ? 'bg-indigo-600 text-white hover:bg-indigo-700'
-                        : 'bg-gray-100 text-gray-400 cursor-not-allowed'
-                    }`}
-                  >
-                    Setup AI Grading
-                  </button>
-                ) : (
-                  <button
-                    onClick={onStart}
-                    disabled={startingGrading || !hasResources}
-                    className={`px-3 py-1.5 text-sm rounded-lg ${
-                      hasResources && !startingGrading
-                        ? 'bg-indigo-600 text-white hover:bg-indigo-700'
-                        : 'bg-gray-100 text-gray-400 cursor-not-allowed'
-                    }`}
-                  >
-                    {startingGrading ? 'Starting…' : 'Start AI Grading'}
-                  </button>
-                )}
-                {!hasResources && (
-                  <span className="text-sm text-gray-400">
-                    {rippleStats ? 'Upload a RiPPLE resource CSV first' : 'Loading…'}
-                  </span>
-                )}
-              </div>
-            )}
-
-            {/* Queued */}
-            {status === 'queued' && (
-              <p className="text-sm text-gray-500">Queued — worker will pick this up shortly…</p>
-            )}
-
-            {/* Running */}
-            {status === 'running' && (() => {
-              const resTotal = rippleStats?.resources ?? 0
-              const modTotal = rippleStats?.moderations ?? 0
-              // Incremental re-run: job.total only counts pending items (starts at 0)
-              const isIncremental = (resTotal + modTotal) > 0 && gradeJob.total < (resTotal + modTotal)
-              const pct = gradeJob.total > 0 ? Math.round((gradeJob.graded / gradeJob.total) * 100) : 0
-              const inPhase2 = !isIncremental && isRnM && resTotal > 0 && gradeJob.graded >= resTotal
-              const phaseGraded = inPhase2 ? gradeJob.graded - resTotal : gradeJob.graded
-              const phaseTotal = inPhase2 ? modTotal : (resTotal || gradeJob.total)
-              const phasePct = phaseTotal > 0 ? Math.round((phaseGraded / phaseTotal) * 100) : 0
-              return (
-                <div>
-                  <div className="flex items-center justify-between mb-1">
-                    <div className="text-sm text-gray-700">
-                      {isIncremental ? (
-                        <span>Grading new submissions <span className="font-medium">{gradeJob.graded} / {gradeJob.total}</span></span>
-                      ) : isRnM ? (
-                        inPhase2 ? (
-                          <span>
-                            <span className="text-emerald-600 font-medium">Resources done</span>
-                            {' — grading moderations '}
-                            <span className="font-medium">{phaseGraded} / {modTotal}</span>
-                          </span>
-                        ) : (
-                          <span>
-                            Grading resources{' '}
-                            <span className="font-medium">{phaseGraded} / {resTotal}</span>
-                            {modTotal > 0 && <span className="text-gray-400"> · then {modTotal} moderations</span>}
-                          </span>
-                        )
-                      ) : (
-                        <span>Grading… <span className="font-medium">{gradeJob.graded} / {gradeJob.total}</span></span>
-                      )}
-                    </div>
-                    <button
-                      onClick={onCancel}
-                      className="px-3 py-1 text-sm border border-gray-300 rounded-lg hover:bg-gray-50"
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                  <div className="w-full bg-gray-200 rounded-full h-2">
-                    <div
-                      className="bg-indigo-500 h-2 rounded-full transition-all"
-                      style={{ width: `${isIncremental ? pct : phasePct}%` }}
-                    />
-                  </div>
-                </div>
-              )
-            })()}
-
-            {/* Cancelled / Error */}
-            {(status === 'cancelled' || status === 'error') && (
-              <div className="flex items-center gap-3">
-                <span className="text-sm text-gray-500 capitalize">{status}</span>
-                <button
-                  onClick={onDelete}
-                  className="px-3 py-1.5 text-sm border border-red-300 text-red-600 rounded-lg hover:bg-red-50"
-                >
-                  Delete Grading
-                </button>
-              </div>
-            )}
-
-            {/* Complete — re-run for new data (only when new records were actually imported) */}
-            {isComplete && hasNewCsvData && (
-              <div className="flex items-center justify-between mb-4 px-3 py-2 bg-indigo-50 border border-indigo-200 rounded-lg">
-                <span className="text-sm text-indigo-700 font-medium">
-                  New CSV data uploaded — grade new submissions whenever you're ready.
-                </span>
-                <button
-                  onClick={() => navigate(`/classes/${classId}/assignments/${assignmentId}/grading-setup?mode=new_submissions`)}
-                  disabled={!hasResources}
-                  className={`px-3 py-1.5 text-sm rounded-lg shrink-0 ml-4 ${
-                    hasResources
-                      ? 'bg-indigo-600 text-white hover:bg-indigo-700'
-                      : 'bg-gray-100 text-gray-400 cursor-not-allowed'
-                  }`}
-                >
-                  Grade New Submissions
-                </button>
-              </div>
-            )}
-
-            {/* Complete — results */}
-            {isComplete && (
-              <>
-                <StudentGradeTable
-                  results={gradeResults}
-                  emailDomain={emailDomain}
-                  onEmail={onEmailResult}
-                  onEmailAll={onEmailStudentAll}
-                  onEmailTopic={onEmailStudentTopic}
-                  onGradeNow={handleGradeNow}
-                  assignment={assignment}
-                  resourceRubric={resourceRubric}
-                  moderationRubric={moderationRubric}
-                />
-              </>
-            )}
-          </div>
-        )}
-
-        {/* ── Teacher Marking tab ── */}
-        {isComplete && activeTab === 'teacher' && (
-          <TeacherGradingPanel
-            resourceQueue={teacherResQueue}
-            moderationQueue={teacherModQueue}
-            resourceRubric={resourceRubric}
-            moderationRubric={moderationRubric}
-            onSave={onSaveTeacherGrade}
-            isRnM={isRnM}
-            startAtResultId={startAtResultId}
-          />
-        )}
-      </div>
-        </>
-      )}
-    </section>
-  )
-}
-
-function StatisticsSection({ gradeReport }) {
-  const [open, setOpen] = useState(false)
-  const hasData =
-    gradeReport.criterion_difficulty?.length > 0 ||
-    gradeReport.topic_breakdown?.length > 0 ||
-    gradeReport.moderation_criterion_difficulty?.length > 0
-
-  if (!hasData) return null
-
-  return (
-    <section className="bg-white border border-gray-200 rounded-xl mb-6 overflow-hidden">
-      <button
-        onClick={() => setOpen((o) => !o)}
-        className="w-full flex items-center justify-between px-5 py-4 hover:bg-gray-50 transition-colors text-left"
-      >
-        <h2 className="font-semibold text-gray-800">Statistics</h2>
-        <span className="text-gray-400 text-sm">{open ? '▲' : '▼'}</span>
-      </button>
-      {open && (
-        <div className="px-5 pb-5 space-y-6">
-          <CriterionDifficultyChart data={gradeReport.criterion_difficulty} />
-          <TopicBreakdownTable data={gradeReport.topic_breakdown} />
-          {gradeReport.moderation_criterion_difficulty?.length > 0 && (
-            <CriterionDifficultyChart data={gradeReport.moderation_criterion_difficulty} />
-          )}
-        </div>
-      )}
-    </section>
-  )
-}
-
 function TabButton({ active, onClick, children }) {
   return (
     <button
@@ -1046,37 +966,6 @@ function PctBar({ pct, colour = 'bg-indigo-500' }) {
   )
 }
 
-function CriterionDifficultyChart({ data }) {
-  if (!data || data.length === 0) return null
-  return (
-    <div>
-      <h4 className="text-sm font-semibold text-gray-700 mb-3">
-        Criterion Difficulty <span className="font-normal text-gray-400">(hardest → easiest)</span>
-      </h4>
-      <div className="space-y-3">
-        {data.map((c) => {
-          const colour = c.avg_pct < 50 ? 'bg-red-400' : c.avg_pct < 75 ? 'bg-yellow-400' : 'bg-green-400'
-          return (
-            <div key={c.criterion_id}>
-              <div className="flex justify-between text-xs mb-1">
-                <span className="font-medium text-gray-700">{c.criterion_name}</span>
-                <span className="text-gray-500">avg {c.avg_points} / {c.max_points} pts</span>
-              </div>
-              <PctBar pct={c.avg_pct} colour={colour} />
-              <div className="mt-1 flex flex-wrap gap-x-3 text-xs text-gray-400">
-                {Object.entries(c.level_distribution)
-                  .sort((a, b) => b[1] - a[1])
-                  .map(([lvl, count]) => (
-                    <span key={lvl}>{lvl}: {count}</span>
-                  ))}
-              </div>
-            </div>
-          )
-        })}
-      </div>
-    </div>
-  )
-}
 
 function TopicBreakdownTable({ data }) {
   if (!data || data.length === 0) return null
@@ -1108,6 +997,362 @@ function TopicBreakdownTable({ data }) {
           })}
         </tbody>
       </table>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Shared histogram renderer + bin builders
+// ---------------------------------------------------------------------------
+
+// Pure renderer — caller pre-computes bins
+function DistributionHistogram({ bins, binLabels, binMidPcts, xLeft = '0%', xMid = '50%', xRight = '100%', countLabel = 'result' }) {
+  const maxCount = Math.max(...bins, 1)
+  return (
+    <>
+      <div className="flex items-end gap-1 h-32">
+        {bins.map((count, i) => {
+          const heightPct = (count / maxCount) * 100
+          const midPct = binMidPcts[i]
+          const colour = midPct < 50 ? 'bg-red-400' : midPct < 75 ? 'bg-yellow-400' : 'bg-green-400'
+          return (
+            <div key={i} className="flex-1 flex flex-col items-center justify-end gap-0.5 h-full group relative">
+              <span className="text-xs text-gray-500 leading-none">{count > 0 ? count : ''}</span>
+              <div
+                className={`w-full rounded-t-sm ${colour} transition-all`}
+                style={{ height: `${heightPct}%`, minHeight: count > 0 ? '3px' : '0' }}
+              />
+              <div className="absolute bottom-full mb-1 left-1/2 -translate-x-1/2 bg-gray-800 text-white text-xs rounded px-2 py-1 whitespace-nowrap opacity-0 group-hover:opacity-100 pointer-events-none z-10 shadow">
+                {binLabels[i]}: {count} {countLabel}{count !== 1 ? 's' : ''}
+              </div>
+            </div>
+          )
+        })}
+      </div>
+      <div className="flex mt-1.5">
+        <span className="text-xs text-gray-400 flex-1 text-left">{xLeft}</span>
+        <span className="text-xs text-gray-400 flex-1 text-center">{xMid}</span>
+        <span className="text-xs text-gray-400 flex-1 text-right">{xRight}</span>
+      </div>
+    </>
+  )
+}
+
+function buildPctBins(percentages) {
+  const bins = Array(10).fill(0)
+  for (const pct of percentages) bins[Math.min(9, Math.floor(pct / 10))]++
+  return {
+    bins,
+    binLabels: ['0–10%', '10–20%', '20–30%', '30–40%', '40–50%', '50–60%', '60–70%', '70–80%', '80–90%', '90–100%'],
+    binMidPcts: [5, 15, 25, 35, 45, 55, 65, 75, 85, 95],
+    xLeft: '0%', xMid: '50%', xRight: '100%',
+  }
+}
+
+// Builds bins keyed to the actual rubric levels for a criterion (sorted ascending by points).
+// Matches each result's criterion_grade to a level by level_id → level_title → closest points.
+function buildLevelBins(relevantResults, criterionId, rubricCriteria) {
+  if (!rubricCriteria || !criterionId) return null
+  const criterion = rubricCriteria.find((c) => c.id === criterionId)
+  if (!criterion) return null
+  const levels = [...(criterion.levels ?? [])].sort((a, b) => a.points - b.points)
+  if (levels.length === 0) return null
+
+  const bins = new Array(levels.length).fill(0)
+  let matched = 0
+  for (const r of relevantResults) {
+    const cg = (r.criterion_grades ?? []).find((g) => g.criterion_id === criterionId)
+    if (!cg) continue
+    let idx = levels.findIndex((l) => String(l.id) === String(cg.level_id))
+    if (idx < 0) idx = levels.findIndex((l) => l.title === cg.level_title)
+    if (idx < 0) {
+      // Fallback: closest points value
+      const pts = cg.points_awarded ?? 0
+      let bestDist = Infinity
+      levels.forEach((l, i) => {
+        const d = Math.abs(l.points - pts)
+        if (d < bestDist) { bestDist = d; idx = i }
+      })
+    }
+    if (idx >= 0) { bins[idx]++; matched++ }
+  }
+  if (matched === 0) return null
+
+  const maxPts = levels[levels.length - 1].points
+  const midIdx = Math.floor((levels.length - 1) / 2)
+  return {
+    bins,
+    binLabels: levels.map((l) => l.title),
+    binMidPcts: levels.map((l) => (maxPts > 0 ? (l.points / maxPts) * 100 : 0)),
+    xLeft: `${levels[0].points} pts`,
+    xMid: `${levels[midIdx].points} pts`,
+    xRight: `${maxPts} pts`,
+    count: matched,
+  }
+}
+
+// Returns grade-based bin data or null if not applicable (no scale / too many bins)
+function buildGradeBins(gradeValues, effAssignment) {
+  if (!effAssignment?.grade_scale_enabled || !effAssignment?.grade_scale_max) return null
+  let step, displayDp
+  switch (effAssignment.grade_rounding ?? 'none') {
+    case 'half': step = 0.5; displayDp = 1; break
+    case 'round': case 'round_up': case 'round_down': {
+      const dp = effAssignment.grade_decimal_places ?? 2
+      step = 1 / Math.pow(10, dp)
+      displayDp = dp
+      break
+    }
+    default: return null
+  }
+  const scaleMax = Number(effAssignment.grade_scale_max)
+  const numBins = Math.round(scaleMax / step) + 1
+  if (numBins > 50) return null
+  // Build bin values avoiding float drift
+  const binValues = Array.from({ length: numBins }, (_, i) => Math.round(i * step * 1e9) / 1e9)
+  const bins = new Array(numBins).fill(0)
+  for (const g of gradeValues) {
+    const idx = binValues.findIndex((bv) => Math.abs(bv - g) < step * 0.5)
+    if (idx >= 0) bins[idx]++
+  }
+  const fmt = (v) => v.toFixed(displayDp)
+  const midBin = Math.floor(numBins / 2)
+  return {
+    bins,
+    binLabels: binValues.map(fmt),
+    binMidPcts: binValues.map((v) => (v / scaleMax) * 100),
+    xLeft: fmt(0), xMid: fmt(binValues[midBin]), xRight: fmt(scaleMax),
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Grade distribution histogram
+// ---------------------------------------------------------------------------
+
+function GradeDistributionChart({ results, assignment, resourceRubric, moderationRubric }) {
+  const isRnM = assignment?.assignment_type === 'resources_and_moderations'
+  const [typeFilter, setTypeFilter] = useState('overall')
+  const maxPossibleResource = computeMaxPoints(resourceRubric)
+  const maxPossibleModeration = computeMaxPoints(moderationRubric ?? resourceRubric)
+
+  const studentData = useMemo(() => {
+    const map = new Map()
+    for (const r of results ?? []) {
+      if (r.result_type === 'resource' && r.primary_author_id) {
+        if (!map.has(r.primary_author_id)) map.set(r.primary_author_id, { resources: [], moderations: [] })
+        map.get(r.primary_author_id).resources.push(r)
+      }
+      if (r.result_type === 'moderation' && r.moderation_user_id) {
+        if (!map.has(r.moderation_user_id)) map.set(r.moderation_user_id, { resources: [], moderations: [] })
+        map.get(r.moderation_user_id).moderations.push(r)
+      }
+    }
+    return [...map.values()]
+  }, [results])
+
+  // Compute per-student grade values plus an effective assignment for binning.
+  const { gradeValues, effAssForBins } = useMemo(() => {
+    const gradeValues = []
+    let effAssForBins = null
+
+    for (const student of studentData) {
+      const resInfo = computeStudentCombined(student.resources, assignment?.combine_resource_max_n ?? null, maxPossibleResource, assignment, false, 'resource')
+      const modInfo = isRnM ? computeStudentCombined(student.moderations, assignment?.combine_moderation_max_n ?? null, maxPossibleModeration, assignment, false, 'moderation') : null
+      let grade = null
+
+      if (typeFilter === 'resource' || (!isRnM && typeFilter === 'overall')) {
+        if (resInfo?.grade != null) {
+          grade = resInfo.grade
+          if (!effAssForBins) effAssForBins = resInfo.effectiveAssignment
+        }
+      } else if (typeFilter === 'moderation') {
+        if (modInfo?.grade != null) {
+          grade = modInfo.grade
+          if (!effAssForBins) effAssForBins = modInfo.effectiveAssignment
+        }
+      } else {
+        // R&M overall — combine resource + moderation grades; combine their scale maxes too
+        const r = resInfo?.grade ?? null
+        const m = modInfo?.grade ?? null
+        if (r !== null || m !== null) {
+          grade = (r ?? 0) + (m ?? 0)
+          if (!effAssForBins) {
+            const resEff = resInfo?.effectiveAssignment
+            const modEff = modInfo?.effectiveAssignment
+            const resMax = resEff?.grade_scale_enabled && resEff?.grade_scale_max ? Number(resEff.grade_scale_max) : maxPossibleResource
+            const modMax = modEff?.grade_scale_enabled && modEff?.grade_scale_max ? Number(modEff.grade_scale_max) : maxPossibleModeration
+            // Build a synthetic effAss covering the combined scale
+            const bothScaled = (resEff?.grade_scale_enabled && modEff?.grade_scale_enabled) ||
+              (!isRnM && resEff?.grade_scale_enabled)
+            effAssForBins = {
+              ...(resEff ?? assignment),
+              grade_scale_enabled: bothScaled,
+              grade_scale_max: resMax + modMax,
+            }
+          }
+        }
+      }
+
+      if (grade != null) gradeValues.push(grade)
+    }
+    return { gradeValues, effAssForBins }
+  }, [studentData, typeFilter, isRnM, assignment, maxPossibleResource, maxPossibleModeration])
+
+  const binData = useMemo(() => {
+    if (gradeValues.length === 0) return null
+    if (effAssForBins?.grade_scale_enabled && effAssForBins?.grade_scale_max) {
+      const gradeBins = buildGradeBins(gradeValues, effAssForBins)
+      if (gradeBins) return { ...gradeBins, count: gradeValues.length }
+      // Too many discrete bins — fall back to % within the grade range
+      const scaleMax = Number(effAssForBins.grade_scale_max)
+      const pcts = gradeValues.map((g) => Math.min(100, Math.max(0, (g / scaleMax) * 100)))
+      return { ...buildPctBins(pcts), count: pcts.length }
+    }
+    // No grade scale — express as % of max raw points
+    const maxPossible = typeFilter === 'moderation' ? maxPossibleModeration :
+      typeFilter === 'overall' && isRnM ? maxPossibleResource + maxPossibleModeration : maxPossibleResource
+    const pcts = gradeValues.map((g) => Math.min(100, Math.max(0, maxPossible > 0 ? (g / maxPossible) * 100 : 0)))
+    return { ...buildPctBins(pcts), count: pcts.length }
+  }, [gradeValues, effAssForBins, typeFilter, isRnM, maxPossibleResource, maxPossibleModeration])
+
+  if (gradeValues.length === 0) return null
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-3">
+        <h4 className="text-sm font-semibold text-gray-700">
+          Grade Distribution
+          <span className="ml-2 font-normal text-gray-400 text-xs">{gradeValues.length} student{gradeValues.length !== 1 ? 's' : ''}</span>
+        </h4>
+        {isRnM && (
+          <div className="flex gap-1">
+            {[['overall', 'Overall'], ['resource', 'Resources'], ['moderation', 'Moderations']].map(([val, label]) => (
+              <button key={val} onClick={() => setTypeFilter(val)}
+                className={`px-2.5 py-1 text-xs rounded-full border transition-colors ${typeFilter === val ? 'bg-indigo-600 border-indigo-600 text-white' : 'border-gray-300 text-gray-500 hover:border-gray-400 hover:bg-gray-50'}`}>
+                {label}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+      {/* key=bins.length triggers a remount (and fade-in) when bar count changes */}
+      <div key={binData?.bins?.length ?? 0} style={{ animation: 'gradeHistFadeIn 0.18s ease' }}>
+        <style>{`@keyframes gradeHistFadeIn { from { opacity: 0 } to { opacity: 1 } }`}</style>
+        <DistributionHistogram {...binData} countLabel="student" />
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Criterion distribution histogram
+// ---------------------------------------------------------------------------
+
+function CriterionDistributionChart({ results, assignment, resourceRubric, moderationRubric }) {
+  const isRnM = assignment?.assignment_type === 'resources_and_moderations'
+  const [typeFilter, setTypeFilter] = useState('overall')
+  const [selectedCriterionId, setSelectedCriterionId] = useState(null)
+
+  // For R&M with no separate mod rubric, fall back to resource rubric for moderations
+  const effectiveModRubric = (isRnM && moderationRubric) ? moderationRubric : (isRnM ? resourceRubric : null)
+
+  // Disable 'Overall' pill when resource and moderation rubrics have different criteria
+  const rubricsDiffer = useMemo(() => {
+    if (!isRnM || !effectiveModRubric) return false
+    const resIds = (resourceRubric?.criteria ?? []).map((c) => c.id)
+    const modIds = (effectiveModRubric?.criteria ?? []).map((c) => c.id)
+    return resIds.length !== modIds.length || resIds.some((id, i) => id !== modIds[i])
+  }, [isRnM, resourceRubric, effectiveModRubric])
+
+  // Auto-reset to 'resource' if 'overall' becomes unavailable
+  useEffect(() => {
+    if (rubricsDiffer && typeFilter === 'overall') setTypeFilter('resource')
+  }, [rubricsDiffer, typeFilter])
+
+  const criteriaOptions = useMemo(() => {
+    const fromRubric = (rubric) =>
+      (rubric?.criteria ?? []).map((c) => ({ id: c.id, name: c.name ?? c.title ?? c.id }))
+    if (!isRnM || typeFilter === 'resource') return fromRubric(resourceRubric)
+    if (typeFilter === 'moderation') return fromRubric(effectiveModRubric)
+    // overall: merge (rubrics are the same when overall is enabled)
+    const seen = new Set()
+    const merged = []
+    for (const c of [...fromRubric(resourceRubric), ...fromRubric(effectiveModRubric)]) {
+      if (!seen.has(c.id)) { seen.add(c.id); merged.push(c) }
+    }
+    return merged
+  }, [resourceRubric, effectiveModRubric, isRnM, typeFilter])
+
+  const effectiveCriterionId = (selectedCriterionId && criteriaOptions.some((c) => c.id === selectedCriterionId))
+    ? selectedCriterionId : (criteriaOptions[0]?.id ?? null)
+
+  const relevantResults = useMemo(() => {
+    if (!isRnM || typeFilter === 'overall') return results ?? []
+    const want = typeFilter === 'resource' ? 'resource' : 'moderation'
+    return (results ?? []).filter((r) => r.result_type === want)
+  }, [results, isRnM, typeFilter])
+
+  const binData = useMemo(() => {
+    if (!effectiveCriterionId) return null
+    // Use the rubric that matches the current view to get level definitions
+    const rubricForView = typeFilter === 'moderation' ? effectiveModRubric : resourceRubric
+    return buildLevelBins(relevantResults, effectiveCriterionId, rubricForView?.criteria ?? [])
+  }, [relevantResults, effectiveCriterionId, typeFilter, resourceRubric, effectiveModRubric])
+
+  if (criteriaOptions.length === 0) return null
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-3">
+        <h4 className="text-sm font-semibold text-gray-700">
+          Criterion Distribution
+          {binData && (
+            <span className="ml-2 font-normal text-gray-400 text-xs">{binData.count} result{binData.count !== 1 ? 's' : ''}</span>
+          )}
+        </h4>
+        {isRnM && (
+          <div className="flex gap-1">
+            {[['overall', 'Overall'], ['resource', 'Resources'], ['moderation', 'Moderations']].map(([val, label]) => {
+              const disabled = val === 'overall' && rubricsDiffer
+              return (
+                <button key={val}
+                  onClick={() => !disabled && setTypeFilter(val)}
+                  title={disabled ? 'Overall unavailable when resource and moderation rubrics differ' : undefined}
+                  className={`px-2.5 py-1 text-xs rounded-full border transition-colors ${
+                    typeFilter === val
+                      ? 'bg-indigo-600 border-indigo-600 text-white'
+                      : disabled
+                        ? 'border-gray-200 text-gray-300 cursor-not-allowed'
+                        : 'border-gray-300 text-gray-500 hover:border-gray-400 hover:bg-gray-50'
+                  }`}>
+                  {label}
+                </button>
+              )
+            })}
+          </div>
+        )}
+      </div>
+      {/* Criterion pills */}
+      <div className="flex flex-wrap gap-1.5 mb-4">
+        {criteriaOptions.map((c) => (
+          <button
+            key={c.id}
+            onClick={() => setSelectedCriterionId(c.id)}
+            className={`px-2.5 py-1 text-xs rounded-full border transition-colors ${
+              effectiveCriterionId === c.id
+                ? 'bg-indigo-600 border-indigo-600 text-white'
+                : 'border-gray-300 text-gray-500 hover:border-gray-400 hover:bg-gray-50'
+            }`}
+          >
+            {c.name}
+          </button>
+        ))}
+      </div>
+      {!binData ? (
+        <p className="text-sm text-gray-400 italic">No data for this criterion.</p>
+      ) : (
+        <DistributionHistogram {...binData} countLabel="result" />
+      )}
     </div>
   )
 }

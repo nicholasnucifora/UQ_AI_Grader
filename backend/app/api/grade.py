@@ -30,6 +30,7 @@ def _build_grade_result_out(r: GradeResult, db: Session) -> GradeResultOut:
     raw_teacher = _parse_criterion_grades(r.teacher_criterion_grades) if r.teacher_criterion_grades else None
     return GradeResultOut(
         id=r.id,
+        job_id=r.job_id,
         result_type=r.result_type,
         ripple_resource_id=r.ripple_resource_id,
         ripple_moderation_id=r.ripple_moderation_id,
@@ -146,9 +147,25 @@ def start_preview_grading(
             raise HTTPException(status_code=400, detail="No resources imported yet")
 
     existing = db.query(GradingJob).filter(GradingJob.assignment_id == assignment_id).first()
+    came_from_full_job = False
     if existing is not None:
         if not existing.is_preview:
-            raise HTTPException(status_code=400, detail="A full grading job already exists — delete it before running a preview")
+            if existing.status in ("running", "queued"):
+                raise HTTPException(status_code=400, detail="A full grading job is in progress — cancel it before running a preview")
+            # Completed/cancelled/error full job: remove the job row but keep GradeResults
+            # so the preview only samples from ungraded resources.
+            # Null out job_id first — SQLite reuses PKs, so a new job could get the same
+            # ID and accidentally match these old results if they weren't orphaned.
+            db.query(GradeResult).filter(
+                GradeResult.assignment_id == assignment_id,
+                GradeResult.job_id == existing.id,
+            ).update({"job_id": None})
+            db.delete(existing)
+            db.commit()
+            came_from_full_job = True
+            existing = None
+
+    if existing is not None:
         if existing.status == "running":
             raise HTTPException(status_code=400, detail="A preview is already running — cancel it first")
         # Clear only the results for the type being re-run; keep the other type's results.
@@ -160,10 +177,11 @@ def start_preview_grading(
         ).delete()
         db.delete(existing)
         db.commit()
-    else:
-        # No existing preview job — clear any stale results from previous full grading runs
+    elif not came_from_full_job:
+        # No existing job at all — clear any stale results from previous runs
         db.query(GradeResult).filter(GradeResult.assignment_id == assignment_id).delete()
         db.commit()
+    # If came_from_full_job: keep GradeResults so preview samples only ungraded resources
 
     # Status starts as "running" — the worker only picks up "queued" jobs, so it
     # will never process this. The background task below handles it directly.
@@ -255,8 +273,13 @@ def start_grading(
     if existing is not None:
         if existing.status == "running" and not existing.is_preview:
             raise HTTPException(status_code=400, detail="Cancel running grading before restarting")
-        # For preview jobs, complete jobs, cancelled, or error: keep GradeResults so the
-        # grading logic skips already-done resources via done_resource_ids.
+        # Null out job_id on any results that referenced this job before deleting it.
+        # SQLite reuses integer PKs when the table becomes empty, so without this,
+        # the new job could get the same ID and accidentally match old results on delete.
+        db.query(GradeResult).filter(
+            GradeResult.assignment_id == assignment_id,
+            GradeResult.job_id == existing.id,
+        ).update({"job_id": None})
         db.delete(existing)
         db.commit()
 
@@ -346,7 +369,12 @@ def delete_grading(
     if job.status == "running" and not job.is_preview:
         raise HTTPException(status_code=400, detail="Cancel grading before deleting")
 
-    db.query(GradeResult).filter(GradeResult.assignment_id == assignment_id).delete()
+    # Only delete results that belong to this specific job run, so that grades
+    # from previous completed runs are preserved after cancelling a partial run.
+    db.query(GradeResult).filter(
+        GradeResult.assignment_id == assignment_id,
+        GradeResult.job_id == job.id,
+    ).delete()
     db.delete(job)
     db.commit()
     return Response(status_code=204)

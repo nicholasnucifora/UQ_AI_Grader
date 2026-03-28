@@ -1,5 +1,9 @@
+import logging
+
 import anthropic
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class AIService:
@@ -17,7 +21,11 @@ class AIService:
         }
         return mapping.get(tier or "haiku", settings.anthropic_haiku)
 
-    _DEFAULT_FEEDBACK_FORMAT = "Provide clear, balanced feedback for each criterion."
+    _DEFAULT_FEEDBACK_FORMAT = (
+        "Be direct and accurate. Award the level the work genuinely deserves — "
+        "do not soften grades. If a criterion is not met at all, award 0. "
+        "If it fully meets the top standard, award full marks."
+    )
 
     def _build_context_section(self, context: dict | None) -> str:
         """Build a grading context block from assignment/class metadata."""
@@ -110,7 +118,7 @@ class AIService:
                                 },
                                 "feedback": {
                                     "type": "string",
-                                    "description": "Specific feedback for this criterion: explain why this level was awarded and how the student could improve.",
+                                    "description": "Specific feedback for this criterion: explain why this level was awarded. If it is not the top level, explain what would be needed to achieve full marks.",
                                 },
                             },
                             "required": [
@@ -157,25 +165,33 @@ class AIService:
         # (the tool is still reliably called since it's the only one and the prompt instructs it)
         tool_choice = {"type": "auto"} if use_thinking else {"type": "tool", "name": "submit_grade"}
 
-        response = self._client.messages.create(
-            model=self._resolve_model(model),
-            max_tokens=max_tokens,
-            system=[{
-                "type": "text",
-                "text": system_prompt,
-                "cache_control": {"type": "ephemeral"},
-            }],
-            tools=[grade_tool],
-            tool_choice=tool_choice,
-            messages=[{"role": "user", "content": f"## Student Submission\n\n{content_block}"}],
-            **extra,
-        )
+        last_exc: Exception = ValueError("grade_submission: no attempts made")
+        for attempt in range(3):
+            if attempt > 0:
+                logger.warning("grade_submission: retry %d/2 (prev error: %s)", attempt, last_exc)
+            response = self._client.messages.create(
+                model=self._resolve_model(model),
+                max_tokens=max_tokens,
+                system=[{
+                    "type": "text",
+                    "text": system_prompt,
+                    "cache_control": {"type": "ephemeral"},
+                }],
+                tools=[grade_tool],
+                tool_choice=tool_choice,
+                messages=[{"role": "user", "content": f"## Student Submission\n\n{content_block}"}],
+                **extra,
+            )
+            for block in response.content:
+                if block.type == "tool_use" and block.name == "submit_grade":
+                    if block.input.get("criterion_grades"):
+                        return block.input
+                    last_exc = ValueError("AI returned empty criterion_grades — no criteria were graded")
+                    break
+            else:
+                last_exc = ValueError("Claude did not return a grade tool call")
 
-        for block in response.content:
-            if block.type == "tool_use" and block.name == "submit_grade":
-                return block.input
-
-        raise ValueError("Claude did not return a grade tool call")
+        raise last_exc
 
     def grade_moderation(
         self,
@@ -260,25 +276,33 @@ class AIService:
 
         tool_choice = {"type": "auto"} if use_thinking else {"type": "tool", "name": "submit_grade"}
 
-        response = self._client.messages.create(
-            model=self._resolve_model(model),
-            max_tokens=max_tokens,
-            system=[{
-                "type": "text",
-                "text": system_prompt,
-                "cache_control": {"type": "ephemeral"},
-            }],
-            tools=[grade_tool],
-            tool_choice=tool_choice,
-            messages=[{"role": "user", "content": user_message}],
-            **extra,
-        )
+        last_exc: Exception = ValueError("grade_moderation: no attempts made")
+        for attempt in range(3):
+            if attempt > 0:
+                logger.warning("grade_moderation: retry %d/2 (prev error: %s)", attempt, last_exc)
+            response = self._client.messages.create(
+                model=self._resolve_model(model),
+                max_tokens=max_tokens,
+                system=[{
+                    "type": "text",
+                    "text": system_prompt,
+                    "cache_control": {"type": "ephemeral"},
+                }],
+                tools=[grade_tool],
+                tool_choice=tool_choice,
+                messages=[{"role": "user", "content": user_message}],
+                **extra,
+            )
+            for block in response.content:
+                if block.type == "tool_use" and block.name == "submit_grade":
+                    if block.input.get("criterion_grades"):
+                        return block.input
+                    last_exc = ValueError("AI returned empty criterion_grades — no criteria were graded")
+                    break
+            else:
+                last_exc = ValueError("Claude did not return a grade tool call")
 
-        for block in response.content:
-            if block.type == "tool_use" and block.name == "submit_grade":
-                return block.input
-
-        raise ValueError("Claude did not return a grade tool call")
+        raise last_exc
 
     def extract_rubric(self, markdown: str) -> dict:
         """

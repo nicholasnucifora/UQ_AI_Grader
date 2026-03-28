@@ -31,6 +31,7 @@ class GradingJobOut(BaseModel):
 
 class GradeResultOut(BaseModel):
     id: int
+    job_id: int | None = None
     result_type: str
     ripple_resource_id: int
     ripple_moderation_id: int | None

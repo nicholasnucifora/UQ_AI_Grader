@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useParams, Link, useNavigate, useSearchParams } from 'react-router-dom'
 import Layout from '../components/Layout'
 import { ReadOnlyMarkingGrid, HTML_PROSE } from '../components/Marking'
@@ -164,6 +164,13 @@ export default function GradingSetupPage() {
   const [rubric, setRubric] = useState(null)
   const [moderationRubric, setModerationRubric] = useState(null)
 
+  // Auto-save
+  const saveEnabled = useRef(false)
+  const saveTimerRef = useRef(null)
+  const savedTimerRef = useRef(null)
+  const [autoSaveStatus, setAutoSaveStatus] = useState(null) // null | 'saving' | 'saved'
+  const [settingsChangedSincePreview, setSettingsChangedSincePreview] = useState(false)
+
   // New submissions mode state
   const [topicsWithoutAttachments, setTopicsWithoutAttachments] = useState([])
   const [showMissingAttachmentsConfirm, setShowMissingAttachmentsConfirm] = useState(false)
@@ -245,7 +252,11 @@ export default function GradingSetupPage() {
           }
         }
       } finally {
-        if (!cancelled) setLoading(false)
+        if (!cancelled) {
+          setLoading(false)
+          // Enable auto-save after the initial render cycle has completed
+          setTimeout(() => { saveEnabled.current = true }, 0)
+        }
       }
     }
     load()
@@ -287,6 +298,39 @@ export default function GradingSetupPage() {
   const rubricLinked = !isRnM || sameRubric
   const notesLinked = !isRnM || sameNotes
 
+  // Auto-save: debounce all editable field changes and save to the backend
+  useEffect(() => {
+    if (!saveEnabled.current) return
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
+    if (savedTimerRef.current) clearTimeout(savedTimerRef.current)
+    saveTimerRef.current = setTimeout(async () => {
+      setAutoSaveStatus('saving')
+      try {
+        await saveAllSettings()
+        setAutoSaveStatus('saved')
+        savedTimerRef.current = setTimeout(() => setAutoSaveStatus(null), 2000)
+      } catch {
+        setAutoSaveStatus(null)
+      }
+    }, 800)
+  }, [
+    classDescription, assignmentDescription, markingMode,
+    sameRubric, sameNotes, additionalNotes, moderationNotes,
+    aiModel, feedbackFormat, useTopicAttachments,
+    topicAttachmentInstructions, topicInstructionOverrides,
+    rubric, moderationRubric,
+  ]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Mark preview as stale when AI-relevant settings change after a run
+  useEffect(() => {
+    if (!saveEnabled.current) return
+    setSettingsChangedSincePreview(true)
+  }, [
+    rubric, moderationRubric, additionalNotes, moderationNotes,
+    aiModel, feedbackFormat, markingMode, sameRubric, sameNotes,
+    useTopicAttachments, topicAttachmentInstructions, topicInstructionOverrides,
+  ]) // eslint-disable-line react-hooks/exhaustive-deps
+
   async function saveAllSettings() {
     await Promise.all([
       api.updateClass(classId, { description: classDescription }),
@@ -316,6 +360,7 @@ export default function GradingSetupPage() {
     setRunning(true)
     setPreviewIdx(0)
     setSelectedGrade(null)
+    setSettingsChangedSincePreview(false)
     // Clear only the results for this type locally so the other type stays visible
     setPreviewResults((prev) => prev ? prev.filter((r) => r.result_type !== type) : null)
     try {
@@ -422,7 +467,10 @@ export default function GradingSetupPage() {
     ? Math.min(100, Math.round(((previewJob?.graded ?? 0) / displayTotal) * 100))
     : 0
 
-  const allResults = previewResults ?? []
+  // Exclude orphaned results (job_id=null) left over from previous full grading runs —
+  // those are kept in the DB so the preview can detect already-graded resources, but
+  // should not appear in the preview display.
+  const allResults = (previewResults ?? []).filter((r) => r.job_id !== null)
   const resourceResults = allResults.filter((r) => r.result_type === 'resource')
   const moderationResults = allResults.filter((r) => r.result_type === 'moderation')
   const hasResourceResults = resourceResults.length > 0
@@ -486,14 +534,22 @@ export default function GradingSetupPage() {
     <Layout>
       <div className="max-w-screen-xl mx-auto space-y-5">
         {/* Breadcrumb */}
-        <p className="text-sm text-gray-500">
-          <Link to="/" className="hover:underline">My Classes</Link>
-          {' / '}
-          <Link to={`/classes/${classId}`} className="hover:underline">{cls?.name ?? '…'}</Link>
-          {' / '}
-          <Link to={`/classes/${classId}/assignments/${assignmentId}`} className="hover:underline">{assignment.title}</Link>
-          {' /'}
-        </p>
+        <div className="flex items-center justify-between">
+          <p className="text-sm text-gray-500">
+            <Link to="/" className="hover:underline">My Classes</Link>
+            {' / '}
+            <Link to={`/classes/${classId}`} className="hover:underline">{cls?.name ?? '…'}</Link>
+            {' / '}
+            <Link to={`/classes/${classId}/assignments/${assignmentId}`} className="hover:underline">{assignment.title}</Link>
+            {' /'}
+          </p>
+          {autoSaveStatus === 'saving' && (
+            <span className="text-xs text-gray-400">Saving…</span>
+          )}
+          {autoSaveStatus === 'saved' && (
+            <span className="text-xs text-green-600">Saved</span>
+          )}
+        </div>
 
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Setup AI Grading</h1>
@@ -876,7 +932,7 @@ export default function GradingSetupPage() {
                 {/* Extend and Run buttons — hidden entirely while any grading is active */}
                 {!isRunning && !running && !extending && (
                   <>
-                    {hasResourceResults && !resourceExtended && (
+                    {hasResourceResults && !resourceExtended && !settingsChangedSincePreview && (
                       <button
                         onClick={() => handleExtendPreview('resource')}
                         title="Grade more resource samples seeking grade spread (up to 15 total)"
@@ -885,7 +941,7 @@ export default function GradingSetupPage() {
                         Extend Resource Preview
                       </button>
                     )}
-                    {isRnM && hasModerationResults && !moderationExtended && (
+                    {isRnM && hasModerationResults && !moderationExtended && !settingsChangedSincePreview && (
                       <button
                         onClick={() => handleExtendPreview('moderation')}
                         title="Grade more moderation samples seeking grade spread (up to 15 total)"
@@ -894,7 +950,7 @@ export default function GradingSetupPage() {
                         Extend Moderation Preview
                       </button>
                     )}
-                    {!hasResourceResults && (
+                    {(!hasResourceResults || settingsChangedSincePreview) && (
                       <button
                         onClick={() => handleRunPreview('resource')}
                         title="Grade 3 sample resource submissions"
@@ -903,7 +959,7 @@ export default function GradingSetupPage() {
                         Run Resource Preview
                       </button>
                     )}
-                    {isRnM && !hasModerationResults && (
+                    {isRnM && (!hasModerationResults || settingsChangedSincePreview) && (
                       <button
                         onClick={() => handleRunPreview('moderation')}
                         title="Grade 3 sample moderation submissions"
@@ -1100,16 +1156,18 @@ export default function GradingSetupPage() {
             <div>
               <h2 className="font-semibold text-gray-800">Grade All Submissions</h2>
               <p className="text-sm text-gray-500 mt-0.5">
-                {isComplete
+                {settingsChangedSincePreview
+                  ? 'Settings have changed — run a new preview before grading.'
+                  : isComplete
                   ? 'Happy with the preview? Accept the current settings and grade all submissions.'
                   : 'Run a preview first to verify the AI output before grading everything.'}
               </p>
             </div>
             <button
               onClick={handleAcceptAndGradeAll}
-              disabled={!isComplete || accepting || isRunning}
+              disabled={!isComplete || accepting || isRunning || settingsChangedSincePreview}
               className={`px-4 py-2 text-sm rounded-lg shrink-0 font-medium ${
-                isComplete && !accepting && !isRunning
+                isComplete && !accepting && !isRunning && !settingsChangedSincePreview
                   ? 'bg-green-600 text-white hover:bg-green-700'
                   : 'bg-gray-100 text-gray-400 cursor-not-allowed'
               }`}

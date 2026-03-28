@@ -42,6 +42,9 @@ class GradeResult(Base):
     assignment_id: Mapped[int] = mapped_column(
         ForeignKey("assignments.id", ondelete="CASCADE"), nullable=False, index=True
     )
+    job_id: Mapped[int | None] = mapped_column(
+        ForeignKey("grading_jobs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     # For resource grades: the resource being graded.
     # For moderation grades: the original resource that was moderated (for context).
     ripple_resource_id: Mapped[int] = mapped_column(

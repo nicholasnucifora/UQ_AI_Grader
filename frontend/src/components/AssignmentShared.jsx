@@ -88,16 +88,26 @@ export function ButtonGroup({ label, options, value, onChange, disabled = false 
  * onChange: (newText) => void
  */
 export function FeedbackFormatPicker({ value, onChange, disabled = false }) {
+  const [savedCustomText, setSavedCustomText] = useState('')
+
   // Derive active preset by matching text against known presets
   const activePreset = FEEDBACK_FORMAT_PRESETS.find(
     (p) => p.value !== 'custom' && p.text === value
   )?.value ?? 'custom'
 
   function selectPreset(preset) {
-    if (preset.value !== 'custom') {
+    if (preset.value === 'custom') {
+      // Already in custom mode (e.g. user typed into a preset) — do nothing
+      if (activePreset === 'custom') return
+      // Otherwise restore whatever the user had typed in Custom previously
+      onChange(savedCustomText)
+    } else {
+      // Leaving custom — save what's there so it survives the switch
+      if (activePreset === 'custom') {
+        setSavedCustomText(value)
+      }
       onChange(preset.text)
     }
-    // clicking Custom doesn't change the text — just lets them edit freely
   }
 
   return (

@@ -95,18 +95,6 @@ def grade_assignment(assignment_id: int, db: Session) -> None:
         .all()
     ]
 
-    # Preview mode: limit to a small sample of one type only
-    # Explicitly cast is_preview to bool — SQLite returns it as int (0/1)
-    if bool(job.is_preview):
-        sample = max(1, int(job.preview_sample_size or 3))
-        ptype = job.preview_type or "resource"
-        if ptype == "moderation":
-            resource_ids = []
-            moderation_ids = moderation_ids[:sample]
-        else:
-            resource_ids = resource_ids[:sample]
-            moderation_ids = []
-
     done_resource_ids = {
         row[0]
         for row in db.query(GradeResult.ripple_resource_id)
@@ -128,6 +116,21 @@ def grade_assignment(assignment_id: int, db: Session) -> None:
         )
         .all()
     }
+
+    # Preview mode: limit to a small sample of one type only, drawn from ungraded items
+    # so that adding new data after a full run gives a valid preview of those new items.
+    # Explicitly cast is_preview to bool — SQLite returns it as int (0/1)
+    if bool(job.is_preview):
+        sample = max(1, int(job.preview_sample_size or 3))
+        ptype = job.preview_type or "resource"
+        if ptype == "moderation":
+            resource_ids = []
+            ungraded_mod_ids = [mid for mid in moderation_ids if mid not in done_moderation_ids]
+            moderation_ids = ungraded_mod_ids[:sample]
+        else:
+            ungraded_resource_ids = [rid for rid in resource_ids if rid not in done_resource_ids]
+            resource_ids = ungraded_resource_ids[:sample]
+            moderation_ids = []
 
     # Filter to only items that still need grading
     pending_resource_ids = [rid for rid in resource_ids if rid not in done_resource_ids]
@@ -191,6 +194,7 @@ def grade_assignment(assignment_id: int, db: Session) -> None:
                 db,
                 _find_grade_result(db, assignment_id, resource_id, "resource"),
                 assignment_id=assignment_id,
+                job_id=job_id,
                 ripple_resource_id=resource_id,
                 result_type="resource",
                 status="complete",
@@ -212,6 +216,7 @@ def grade_assignment(assignment_id: int, db: Session) -> None:
                 db,
                 _find_grade_result(db, assignment_id, resource_id, "resource"),
                 assignment_id=assignment_id,
+                job_id=job_id,
                 ripple_resource_id=resource_id,
                 result_type="resource",
                 status="error",
@@ -303,6 +308,7 @@ def grade_assignment(assignment_id: int, db: Session) -> None:
                 db,
                 _find_grade_result(db, assignment_id, original_resource_pk, "moderation", mod_id_val),
                 assignment_id=assignment_id,
+                job_id=job_id,
                 ripple_resource_id=original_resource_pk,
                 ripple_moderation_id=mod_id_val,
                 result_type="moderation",
@@ -325,6 +331,7 @@ def grade_assignment(assignment_id: int, db: Session) -> None:
                 db,
                 _find_grade_result(db, assignment_id, original_resource_pk, "moderation", mod_id_val),
                 assignment_id=assignment_id,
+                job_id=job_id,
                 ripple_resource_id=original_resource_pk,
                 ripple_moderation_id=mod_id_val,
                 result_type="moderation",
@@ -514,6 +521,7 @@ def grade_preview_extension(assignment_id: int, db: Session, max_total: int = 15
                 db,
                 _find_grade_result(db, assignment_id, resource_id, "resource"),
                 assignment_id=assignment_id,
+                job_id=job_id,
                 ripple_resource_id=resource_id,
                 result_type="resource",
                 status="complete",
@@ -652,6 +660,7 @@ def _extend_moderation_preview(
                 db,
                 _find_grade_result(db, assignment_id, original_resource_pk, "moderation", moderation_id),
                 assignment_id=assignment_id,
+                job_id=job_id,
                 ripple_resource_id=original_resource_pk,
                 ripple_moderation_id=moderation_id,
                 result_type="moderation",

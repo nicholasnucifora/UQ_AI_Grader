@@ -7,6 +7,12 @@ async function request(path, options = {}) {
     ...options,
   })
   if (!response.ok) {
+    if (response.status === 401) {
+      if (window.location.pathname !== '/login') {
+        window.location.href = '/login'
+      }
+      throw new Error('Session expired')
+    }
     const error = await response.json().catch(() => ({}))
     throw new Error(error.detail || `HTTP ${response.status}`)
   }
