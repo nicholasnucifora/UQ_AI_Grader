@@ -14,7 +14,7 @@ from app.models.class_ import Class
 from app.models.grade import GradeResult, GradingJob
 from app.models.ripple import RippleModeration, RippleResource
 from app.models.topic import TopicAttachment
-from app.services.ai_service import ai_service
+from app.services.ai_service import ai_service, format_ai_error
 
 logger = logging.getLogger(__name__)
 
@@ -358,7 +358,7 @@ def grade_assignment(assignment_id: int, db: Session) -> None:
                 status="error",
                 criterion_grades=[],
                 overall_feedback="",
-                error_message=str(exc),
+                error_message=format_ai_error(exc),
                 graded_at=datetime.now(timezone.utc),
             )
             db.query(GradingJob).filter(GradingJob.id == job_id).update({
@@ -475,7 +475,7 @@ def grade_assignment(assignment_id: int, db: Session) -> None:
                 status="error",
                 criterion_grades=[],
                 overall_feedback="",
-                error_message=str(exc),
+                error_message=format_ai_error(exc),
                 graded_at=datetime.now(timezone.utc),
             )
             db.query(GradingJob).filter(GradingJob.id == job_id).update({

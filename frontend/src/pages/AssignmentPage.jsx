@@ -99,6 +99,7 @@ export default function AssignmentPage() {
   const [topics, setTopics] = useState([])
   const [className, setClassName] = useState(null)
   const [exportSortOrder, setExportSortOrder] = useState('surname_asc')
+  const [exportSelectedTopics, setExportSelectedTopics] = useState(null) // null = all selected
   const [exportMenuOpen, setExportMenuOpen] = useState(false)
   const exportMenuRef = useRef(null)
   // Tab + filter state
@@ -210,6 +211,20 @@ export default function AssignmentPage() {
     }
   }
 
+  // Topics for export filter — sourced from the already-loaded topics state.
+  const exportTopicsList = useMemo(() =>
+    topics.map((t) => t.topic).filter(Boolean),
+  [topics])
+
+  function toggleExportTopic(topic) {
+    const current = exportSelectedTopics ?? new Set(exportTopicsList)
+    const next = new Set(current)
+    if (next.has(topic)) next.delete(topic)
+    else next.add(topic)
+    // If all topics selected again, reset to null (= "all")
+    setExportSelectedTopics(next.size === exportTopicsList.length ? null : next)
+  }
+
   function handleExportAiGrades() {
     if (!gradeResults || gradeResults.length === 0) return
     const resourceRubric = rubricData?.rubric ?? null
@@ -217,6 +232,16 @@ export default function AssignmentPage() {
     const maxPossibleResource = computeMaxPoints(resourceRubric)
     const maxPossibleModeration = computeMaxPoints(moderationRubric ?? resourceRubric)
     const isRnM = assignment?.assignment_type === 'resources_and_moderations'
+    const effectiveTopics = exportSelectedTopics ?? new Set(exportTopicsList)
+
+    function getSurname(name) {
+      if (!name) return ''
+      return name.trim().split(/\s+/).pop().toLowerCase()
+    }
+
+    function getResultTopic(r) {
+      return (r.resource_topics ?? '').trim() || null
+    }
 
     // Build per-student data
     const studentMap = new Map()
@@ -233,68 +258,112 @@ export default function AssignmentPage() {
       }
     }
 
-    let rows = [...studentMap.values()].map((s) => {
-      const resAi = computeStudentCombined(s.resources, assignment?.combine_resource_max_n ?? null, maxPossibleResource, assignment, false, 'resource')
-      const resTeacher = computeStudentCombined(s.resources, assignment?.combine_resource_max_n ?? null, maxPossibleResource, assignment, true, 'resource')
-      const modAi = isRnM ? computeStudentCombined(s.moderations, assignment?.combine_moderation_max_n ?? null, maxPossibleModeration, assignment, false, 'moderation') : null
-      const modTeacher = isRnM ? computeStudentCombined(s.moderations, assignment?.combine_moderation_max_n ?? null, maxPossibleModeration, assignment, true, 'moderation') : null
-      const resAiGrade = resAi?.grade ?? null
-      const modAiGrade = modAi?.grade ?? null
-      // Overall = sum of available AI grades (null treated as absent, not 0)
-      const overallAiGrade = resAiGrade !== null || modAiGrade !== null
-        ? (resAiGrade ?? 0) + (modAiGrade ?? 0)
-        : null
-      return {
-        ...s,
-        resAiGrade,
-        resTeacherGrade: resTeacher?.grade ?? null,
-        modAiGrade,
-        modTeacherGrade: modTeacher?.grade ?? null,
-        overallAiGrade,
+    let csvRows, headers
+
+    if (exportTopicsList.length > 0) {
+      // ── Per-topic format ──────────────────────────────────────────────────
+      // One row per student × topic. Students sorted by primary key, then
+      // secondary sort by topic name within each student.
+
+      // For each student, compute a sort key (overall grade across selected topics)
+      const studentSortKeys = new Map()
+      for (const [sid, s] of studentMap) {
+        const filteredRes = s.resources.filter((r) => { const t = getResultTopic(r); return t && effectiveTopics.has(t) })
+        const filteredMod = s.moderations.filter((m) => { const t = getResultTopic(m); return t && effectiveTopics.has(t) })
+        const resAi = computeStudentCombined(filteredRes, assignment?.combine_resource_max_n ?? null, maxPossibleResource, assignment, false, 'resource')
+        const modAi = isRnM ? computeStudentCombined(filteredMod, assignment?.combine_moderation_max_n ?? null, maxPossibleModeration, assignment, false, 'moderation') : null
+        studentSortKeys.set(sid, { name: s.name, overall: (resAi?.grade ?? 0) + (modAi?.grade ?? 0) })
       }
-    })
 
-    function getSurname(name) {
-      if (!name) return ''
-      const parts = name.trim().split(/\s+/)
-      return parts[parts.length - 1].toLowerCase()
+      // Sort students by the chosen sort key
+      const sortedStudents = [...studentMap.values()].sort((a, b) => {
+        const ka = studentSortKeys.get(a.id)
+        const kb = studentSortKeys.get(b.id)
+        switch (exportSortOrder) {
+          case 'surname_asc': return getSurname(ka?.name).localeCompare(getSurname(kb?.name))
+          case 'surname_desc': return getSurname(kb?.name).localeCompare(getSurname(ka?.name))
+          case 'student_id_asc': return (a.id || '').localeCompare(b.id || '')
+          case 'overall_desc': return (kb?.overall ?? -Infinity) - (ka?.overall ?? -Infinity)
+          case 'overall_asc': return (ka?.overall ?? Infinity) - (kb?.overall ?? Infinity)
+          default: return 0
+        }
+      })
+
+      // Build one row per student × topic
+      const dataRows = []
+      for (const s of sortedStudents) {
+        // Group resources and moderations by topic, filtered to selected topics
+        const topicRes = new Map()
+        for (const r of s.resources) {
+          const t = getResultTopic(r)
+          if (!t || !effectiveTopics.has(t)) continue
+          if (!topicRes.has(t)) topicRes.set(t, [])
+          topicRes.get(t).push(r)
+        }
+        const topicMod = new Map()
+        if (isRnM) {
+          for (const m of s.moderations) {
+            const t = getResultTopic(m)
+            if (!t || !effectiveTopics.has(t)) continue
+            if (!topicMod.has(t)) topicMod.set(t, [])
+            topicMod.get(t).push(m)
+          }
+        }
+
+        // All topics this student has data for, sorted by name
+        const studentTopics = [...new Set([...topicRes.keys(), ...topicMod.keys()])].sort()
+        for (const topic of studentTopics) {
+          const res = topicRes.get(topic) ?? []
+          const mods = topicMod.get(topic) ?? []
+          const resAi = computeStudentCombined(res, assignment?.combine_resource_max_n ?? null, maxPossibleResource, assignment, false, 'resource')
+          const resTeacher = computeStudentCombined(res, assignment?.combine_resource_max_n ?? null, maxPossibleResource, assignment, true, 'resource')
+          const modAi = isRnM ? computeStudentCombined(mods, assignment?.combine_moderation_max_n ?? null, maxPossibleModeration, assignment, false, 'moderation') : null
+          const modTeacher = isRnM ? computeStudentCombined(mods, assignment?.combine_moderation_max_n ?? null, maxPossibleModeration, assignment, true, 'moderation') : null
+          const row = [s.name || s.id || '', s.id || '', topic, resAi?.grade ?? '']
+          if (isRnM) row.push(modAi?.grade ?? '')
+          row.push(resTeacher?.grade ?? '')
+          if (isRnM) row.push(modTeacher?.grade ?? '')
+          dataRows.push(row)
+        }
+      }
+
+      headers = ['Student Name', 'Student ID', 'Topic', 'Resource AI Grade']
+      if (isRnM) headers.push('Moderation AI Grade')
+      headers.push('Resource Teacher Grade')
+      if (isRnM) headers.push('Moderation Teacher Grade')
+      csvRows = [headers, ...dataRows]
+
+    } else {
+      // ── No-topic fallback: one row per student (original format) ──────────
+      let rows = [...studentMap.values()].map((s) => {
+        const resAi = computeStudentCombined(s.resources, assignment?.combine_resource_max_n ?? null, maxPossibleResource, assignment, false, 'resource')
+        const resTeacher = computeStudentCombined(s.resources, assignment?.combine_resource_max_n ?? null, maxPossibleResource, assignment, true, 'resource')
+        const modAi = isRnM ? computeStudentCombined(s.moderations, assignment?.combine_moderation_max_n ?? null, maxPossibleModeration, assignment, false, 'moderation') : null
+        const modTeacher = isRnM ? computeStudentCombined(s.moderations, assignment?.combine_moderation_max_n ?? null, maxPossibleModeration, assignment, true, 'moderation') : null
+        const resAiGrade = resAi?.grade ?? null
+        const modAiGrade = modAi?.grade ?? null
+        const overallAiGrade = resAiGrade !== null || modAiGrade !== null ? (resAiGrade ?? 0) + (modAiGrade ?? 0) : null
+        return { ...s, resAiGrade, resTeacherGrade: resTeacher?.grade ?? null, modAiGrade, modTeacherGrade: modTeacher?.grade ?? null, overallAiGrade }
+      })
+      switch (exportSortOrder) {
+        case 'surname_asc': rows.sort((a, b) => getSurname(a.name).localeCompare(getSurname(b.name))); break
+        case 'surname_desc': rows.sort((a, b) => getSurname(b.name).localeCompare(getSurname(a.name))); break
+        case 'student_id_asc': rows.sort((a, b) => (a.id || '').localeCompare(b.id || '')); break
+        case 'overall_desc': rows.sort((a, b) => (b.overallAiGrade ?? -Infinity) - (a.overallAiGrade ?? -Infinity)); break
+        case 'overall_asc': rows.sort((a, b) => (a.overallAiGrade ?? Infinity) - (b.overallAiGrade ?? Infinity)); break
+      }
+      headers = ['Student Name', 'Student ID', 'Overall AI Grade', 'Resource AI Grade']
+      if (isRnM) headers.push('Moderation AI Grade')
+      headers.push('Resource Teacher Grade')
+      if (isRnM) headers.push('Moderation Teacher Grade')
+      csvRows = [headers, ...rows.map((s) => {
+        const row = [s.name || s.id || '', s.id || '', s.overallAiGrade !== null ? s.overallAiGrade : '', s.resAiGrade !== null ? s.resAiGrade : '']
+        if (isRnM) row.push(s.modAiGrade !== null ? s.modAiGrade : '')
+        row.push(s.resTeacherGrade !== null ? s.resTeacherGrade : '')
+        if (isRnM) row.push(s.modTeacherGrade !== null ? s.modTeacherGrade : '')
+        return row
+      })]
     }
-
-    switch (exportSortOrder) {
-      case 'surname_asc':
-        rows.sort((a, b) => getSurname(a.name).localeCompare(getSurname(b.name)))
-        break
-      case 'surname_desc':
-        rows.sort((a, b) => getSurname(b.name).localeCompare(getSurname(a.name)))
-        break
-      case 'student_id_asc':
-        rows.sort((a, b) => (a.id || '').localeCompare(b.id || ''))
-        break
-      case 'overall_desc':
-        rows.sort((a, b) => (b.overallAiGrade ?? -Infinity) - (a.overallAiGrade ?? -Infinity))
-        break
-      case 'overall_asc':
-        rows.sort((a, b) => (a.overallAiGrade ?? Infinity) - (b.overallAiGrade ?? Infinity))
-        break
-    }
-
-    const headers = ['Student Name', 'Student ID', 'Overall AI Grade', 'Resource AI Grade']
-    if (isRnM) headers.push('Moderation AI Grade')
-    headers.push('Resource Teacher Grade')
-    if (isRnM) headers.push('Moderation Teacher Grade')
-
-    const csvRows = [headers, ...rows.map((s) => {
-      const row = [
-        s.name || s.id || '',
-        s.id || '',
-        s.overallAiGrade !== null ? s.overallAiGrade : '',
-        s.resAiGrade !== null ? s.resAiGrade : '',
-      ]
-      if (isRnM) row.push(s.modAiGrade !== null ? s.modAiGrade : '')
-      row.push(s.resTeacherGrade !== null ? s.resTeacherGrade : '')
-      if (isRnM) row.push(s.modTeacherGrade !== null ? s.modTeacherGrade : '')
-      return row
-    })]
 
     const csvContent = csvRows.map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n')
     const blob = new Blob([csvContent], { type: 'text/csv' })
@@ -748,7 +817,38 @@ export default function AssignmentPage() {
                     {exportMenuOpen && (
                       <>
                         <div className="fixed inset-0 z-10" onClick={() => setExportMenuOpen(false)} />
-                        <div className="absolute right-0 top-full mt-1 bg-white border border-gray-200 rounded-xl shadow-lg p-3 z-20 w-52">
+                        <div className="absolute right-0 top-full mt-1 bg-white border border-gray-200 rounded-xl shadow-lg p-3 z-20 w-60">
+                          {exportTopicsList.length > 0 && (
+                            <div className="mb-3">
+                              <div className="flex items-center justify-between mb-1.5">
+                                <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Topics</p>
+                                <button
+                                  className="text-xs text-emerald-600 hover:underline"
+                                  onClick={() => setExportSelectedTopics(
+                                    exportSelectedTopics === null ? new Set() : null
+                                  )}
+                                >
+                                  {exportSelectedTopics === null ? 'Deselect all' : 'Select all'}
+                                </button>
+                              </div>
+                              <div className="space-y-1.5 max-h-40 overflow-y-auto">
+                                {exportTopicsList.map((topic) => {
+                                  const checked = exportSelectedTopics === null || exportSelectedTopics.has(topic)
+                                  return (
+                                    <label key={topic} className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                                      <input
+                                        type="checkbox"
+                                        checked={checked}
+                                        onChange={() => toggleExportTopic(topic)}
+                                        className="accent-emerald-600"
+                                      />
+                                      <span className="truncate">{topic}</span>
+                                    </label>
+                                  )
+                                })}
+                              </div>
+                            </div>
+                          )}
                           <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Sort order</p>
                           <div className="space-y-1.5 mb-3">
                             {[
@@ -774,9 +874,13 @@ export default function AssignmentPage() {
                           <button
                             onClick={() => { handleExportAiGrades(); setExportMenuOpen(false) }}
                             className="w-full px-3 py-1.5 text-sm rounded-lg bg-emerald-600 text-white hover:bg-emerald-700"
+                            disabled={exportSelectedTopics !== null && exportSelectedTopics.size === 0}
                           >
                             Export
                           </button>
+                          {exportSelectedTopics !== null && exportSelectedTopics.size === 0 && (
+                            <p className="text-xs text-center text-gray-400 mt-1">Select at least one topic</p>
+                          )}
                         </div>
                       </>
                     )}

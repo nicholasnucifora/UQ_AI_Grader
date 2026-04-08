@@ -15,7 +15,7 @@ from app.models.ripple import RippleModeration, RippleResource
 from app.models.topic import TopicAttachment
 from app.models.user import User
 from app.schemas.grade import GradingJobOut, GradeResultOut, RedoGradeIn, TeacherGradeIn
-from app.services.ai_service import ai_service
+from app.services.ai_service import ai_service, format_ai_error
 from app.services.auth_service import get_current_user
 from app.services.grading_logic import (
     grade_assignment,
@@ -877,7 +877,7 @@ def redo_ai_grade(
                 topic_attachment_instructions=assignment.topic_attachment_instructions or "",
             )
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"AI grading failed: {exc}")
+        raise HTTPException(status_code=500, detail=format_ai_error(exc))
 
     result.criterion_grades = ai_result["criterion_grades"]
     result.overall_feedback = ai_result.get("overall_feedback", "")

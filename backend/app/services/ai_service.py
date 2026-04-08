@@ -1,9 +1,56 @@
 import logging
+import time
 
 import anthropic
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+# HTTP status codes that are transient — safe to retry after a short wait.
+_RETRYABLE_STATUS_CODES = {429, 529}
+# Seconds to wait before retry attempts 2 and 3.
+_RETRY_DELAYS = [10, 30]
+
+
+def format_ai_error(exc: Exception) -> str:
+    """Convert an AI service exception into a teacher-friendly error message."""
+    if isinstance(exc, anthropic.APIStatusError):
+        if exc.status_code == 529:
+            return (
+                "The AI service is temporarily overloaded (Anthropic's servers are busy). "
+                "This is not an issue with your submission. Please try again in a few minutes."
+            )
+        if exc.status_code == 429:
+            return (
+                "The AI service rate limit was reached — too many requests were sent at once. "
+                "Please wait a minute and try again."
+            )
+        if exc.status_code == 401:
+            return (
+                "The AI service rejected the API key. "
+                "Please contact your system administrator to check the API key configuration."
+            )
+        if exc.status_code == 400:
+            return (
+                "The AI service could not process this request (bad request). "
+                "This may be caused by content that is too long or cannot be read. "
+                f"Technical detail: {exc}"
+            )
+        return (
+            f"The AI service returned an unexpected error (code {exc.status_code}). "
+            "Please try again or contact support if the problem persists."
+        )
+    if isinstance(exc, anthropic.APIConnectionError):
+        return (
+            "Could not connect to the AI service. "
+            "Please check your internet connection and try again."
+        )
+    if isinstance(exc, anthropic.APITimeoutError):
+        return (
+            "The AI service took too long to respond. "
+            "This can happen with large submissions. Please try again."
+        )
+    return f"AI grading encountered an unexpected error: {exc}"
 
 
 class AIService:
@@ -178,20 +225,31 @@ class AIService:
         last_exc: Exception = ValueError("grade_submission: no attempts made")
         for attempt in range(3):
             if attempt > 0:
-                logger.warning("grade_submission: retry %d/2 (prev error: %s)", attempt, last_exc)
-            response = self._client.messages.create(
-                model=self._resolve_model(model),
-                max_tokens=max_tokens,
-                system=[{
-                    "type": "text",
-                    "text": system_prompt,
-                    "cache_control": {"type": "ephemeral"},
-                }],
-                tools=[grade_tool],
-                tool_choice=tool_choice,
-                messages=[{"role": "user", "content": f"## Student Submission\n\n{content_block}"}],
-                **extra,
-            )
+                delay = _RETRY_DELAYS[attempt - 1]
+                logger.warning(
+                    "grade_submission: retry %d/2 after %ds (prev error: %s)",
+                    attempt, delay, last_exc,
+                )
+                time.sleep(delay)
+            try:
+                response = self._client.messages.create(
+                    model=self._resolve_model(model),
+                    max_tokens=max_tokens,
+                    system=[{
+                        "type": "text",
+                        "text": system_prompt,
+                        "cache_control": {"type": "ephemeral"},
+                    }],
+                    tools=[grade_tool],
+                    tool_choice=tool_choice,
+                    messages=[{"role": "user", "content": f"## Student Submission\n\n{content_block}"}],
+                    **extra,
+                )
+            except anthropic.APIStatusError as api_err:
+                if api_err.status_code in _RETRYABLE_STATUS_CODES:
+                    last_exc = api_err
+                    continue
+                raise
             for block in response.content:
                 if block.type == "tool_use" and block.name == "submit_grade":
                     if block.input.get("criterion_grades"):
@@ -290,20 +348,31 @@ class AIService:
         last_exc: Exception = ValueError("grade_moderation: no attempts made")
         for attempt in range(3):
             if attempt > 0:
-                logger.warning("grade_moderation: retry %d/2 (prev error: %s)", attempt, last_exc)
-            response = self._client.messages.create(
-                model=self._resolve_model(model),
-                max_tokens=max_tokens,
-                system=[{
-                    "type": "text",
-                    "text": system_prompt,
-                    "cache_control": {"type": "ephemeral"},
-                }],
-                tools=[grade_tool],
-                tool_choice=tool_choice,
-                messages=[{"role": "user", "content": user_message}],
-                **extra,
-            )
+                delay = _RETRY_DELAYS[attempt - 1]
+                logger.warning(
+                    "grade_moderation: retry %d/2 after %ds (prev error: %s)",
+                    attempt, delay, last_exc,
+                )
+                time.sleep(delay)
+            try:
+                response = self._client.messages.create(
+                    model=self._resolve_model(model),
+                    max_tokens=max_tokens,
+                    system=[{
+                        "type": "text",
+                        "text": system_prompt,
+                        "cache_control": {"type": "ephemeral"},
+                    }],
+                    tools=[grade_tool],
+                    tool_choice=tool_choice,
+                    messages=[{"role": "user", "content": user_message}],
+                    **extra,
+                )
+            except anthropic.APIStatusError as api_err:
+                if api_err.status_code in _RETRYABLE_STATUS_CODES:
+                    last_exc = api_err
+                    continue
+                raise
             for block in response.content:
                 if block.type == "tool_use" and block.name == "submit_grade":
                     if block.input.get("criterion_grades"):
