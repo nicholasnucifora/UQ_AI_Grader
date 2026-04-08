@@ -6,7 +6,7 @@ import { api } from '../api/client'
 export default function AdminAssignmentsTab({ classId, classData, initialOpenId }) {
   const [assignments, setAssignments] = useState(classData.assignments)
   const [expandedId, setExpandedId] = useState(null)
-  // Per-assignment edit state: { [assignmentId]: { title, description, strictness, rubric, rubricExists } }
+  // Per-assignment edit state: { [assignmentId]: { title, description, rubric, rubricExists } }
   const [editState, setEditState] = useState({})
   const [saving, setSaving] = useState({})
   const [errors, setErrors] = useState({})
@@ -32,7 +32,6 @@ export default function AdminAssignmentsTab({ classId, classData, initialOpenId 
       const base = {
         title: assignment.title,
         description: assignment.description ?? '',
-        strictness: assignment.strictness ?? 'standard',
         additional_notes: assignment.additional_notes ?? '',
         rubric: null,
         rubricExists: false,
@@ -68,7 +67,6 @@ export default function AdminAssignmentsTab({ classId, classData, initialOpenId 
         title: state.title,
         description: state.description,
         marking_criteria: '',
-        strictness: state.strictness,
         additional_notes: state.additional_notes,
       })
       // Save / update rubric
@@ -188,19 +186,6 @@ export default function AdminAssignmentsTab({ classId, classData, initialOpenId 
                     {/* AI Grading Options — below rubric, matching the create form */}
                     <div className="border-t border-gray-200 pt-5 space-y-4">
                       <h3 className="text-sm font-semibold text-gray-700">AI Grading Options</h3>
-
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">Strictness</label>
-                        <select
-                          className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                          value={state.strictness}
-                          onChange={(e) => updateField(assignment.id, 'strictness', e.target.value)}
-                        >
-                          <option value="lenient">Lenient</option>
-                          <option value="standard">Standard</option>
-                          <option value="strict">Strict</option>
-                        </select>
-                      </div>
 
                       <div>
                         <label className="block text-sm font-medium text-gray-700 mb-1">Additional notes for AI</label>

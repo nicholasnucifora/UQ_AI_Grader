@@ -1,4 +1,38 @@
-import { Fragment, useEffect, useMemo, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
+
+// Format a date string (ISO or RiPPLE CSV DD-MM-YYYY HH:MM) → "March 3rd, 6:32 pm"
+function formatSubmissionDate(raw) {
+  if (!raw) return null
+  let d
+  const iso = new Date(raw)
+  if (!isNaN(iso)) {
+    d = iso
+  } else {
+    const m = raw.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})(?:\s+(\d{1,2}):(\d{2}))?/)
+    if (!m) return raw
+    const [, dd, mm, yyyy, hh = '0', min = '0'] = m
+    d = new Date(+yyyy, +mm - 1, +dd, +hh, +min)
+    if (isNaN(d)) return raw
+  }
+  const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December']
+  const day = d.getDate()
+  const suffix = (day % 100 >= 11 && day % 100 <= 13) ? 'th' : ['th','st','nd','rd'][Math.min(day % 10, 3)]
+  const h = d.getHours()
+  const min = d.getMinutes().toString().padStart(2, '0')
+  const ampm = h >= 12 ? 'pm' : 'am'
+  const h12 = h % 12 || 12
+  return `${MONTHS[d.getMonth()]} ${day}${suffix}, ${h12}:${min} ${ampm}`
+}
+
+// Format seconds late into the most appropriate unit (days / hours / minutes)
+function formatLateness(seconds) {
+  const days = Math.floor(seconds / 86400)
+  if (days > 0) return `${days} day${days !== 1 ? 's' : ''}`
+  const hours = Math.floor(seconds / 3600)
+  if (hours > 0) return `${hours} hour${hours !== 1 ? 's' : ''}`
+  const minutes = Math.max(1, Math.floor(seconds / 60))
+  return `${minutes} minute${minutes !== 1 ? 's' : ''}`
+}
 
 // Minimal markdown → HTML for AI feedback (bold, numbered lists, bullets, paragraphs).
 // Text is HTML-escaped first, so this is safe to use with dangerouslySetInnerHTML.
@@ -151,12 +185,14 @@ export function getEffectiveAssignment(assignment, resultType) {
 // isComplete = all submitted submissions are graded (we only show the final grade when fully done).
 export function computeStudentCombined(submissions, maxN, maxPossible, assignment, useTeacher, resultType) {
   const effectiveAssignment = getEffectiveAssignment(assignment, resultType)
-  const total = submissions.length
+  // Exclude dismissed late submissions from grade calculations
+  const eligible = submissions.filter((r) => r.status !== 'excluded')
+  const total = eligible.length
   if (total === 0) return null
 
   const gradedSubs = useTeacher
-    ? submissions.filter((r) => r.teacher_criterion_grades && r.teacher_criterion_grades.length > 0)
-    : submissions.filter((r) => r.status === 'complete')
+    ? eligible.filter((r) => r.teacher_criterion_grades && r.teacher_criterion_grades.length > 0)
+    : eligible.filter((r) => r.status === 'complete')
 
   const graded = gradedSubs.length
   const isComplete = graded === total
@@ -164,7 +200,15 @@ export function computeStudentCombined(submissions, maxN, maxPossible, assignmen
   const rawScores = gradedSubs
     .map((r) => {
       const grades = useTeacher ? (r.teacher_criterion_grades ?? []) : (r.criterion_grades ?? [])
-      return grades.reduce((s, g) => s + (g.points_awarded || 0), 0)
+      const rawScore = grades.reduce((s, g) => s + (g.points_awarded || 0), 0)
+      // Renormalize to current maxPossible scale if this result was graded under a different rubric
+      if (!useTeacher && r.rubric_max_points_json && maxPossible > 0) {
+        const storedMax = Object.values(r.rubric_max_points_json).reduce((s, v) => s + v, 0)
+        if (storedMax > 0 && storedMax !== maxPossible) {
+          return (rawScore / storedMax) * maxPossible
+        }
+      }
+      return rawScore
     })
     .sort((a, b) => b - a) // descending so slice(0, maxN) gives best N
 
@@ -215,6 +259,14 @@ function IconMail() {
   )
 }
 
+function IconUndo() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-3.5 h-3.5">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M9 15L3 9m0 0l6-6M3 9h12a6 6 0 010 12h-3" />
+    </svg>
+  )
+}
+
 function IconChevron({ open }) {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={`w-3.5 h-3.5 transition-transform ${open ? 'rotate-90' : ''}`}>
@@ -223,14 +275,17 @@ function IconChevron({ open }) {
   )
 }
 
-function SubmissionRow({ result: r, onEmailIndividual, onGradeNow, assignment, maxPossible, indent }) {
+function SubmissionRow({ result: r, onEmailIndividual, onGradeNow, onGrantExtension, onAcknowledgeLate, onUndoDismiss, onRevokeExtension, assignment, maxPossible, indent }) {
   const aiRaw = (r.criterion_grades ?? []).reduce((s, g) => s + (g.points_awarded || 0), 0)
   const teacherRaw = r.teacher_criterion_grades
     ? r.teacher_criterion_grades.reduce((s, g) => s + (g.points_awarded || 0), 0)
     : null
 
   const effectiveAssignment = getEffectiveAssignment(assignment, r.result_type)
-  const scaledAi = applyScaling(aiRaw, maxPossible, effectiveAssignment)
+  const aiMaxPossible = r.rubric_max_points_json
+    ? Object.values(r.rubric_max_points_json).reduce((s, v) => s + v, 0) || maxPossible
+    : maxPossible
+  const scaledAi = applyScaling(aiRaw, aiMaxPossible, effectiveAssignment)
   const scaledTeacher = teacherRaw !== null ? applyScaling(teacherRaw, maxPossible, effectiveAssignment) : null
   const isScaling = effectiveAssignment?.grade_scale_enabled && effectiveAssignment?.grade_scale_max
 
@@ -239,21 +294,23 @@ function SubmissionRow({ result: r, onEmailIndividual, onGradeNow, assignment, m
 
   return (
     <tr className="hover:bg-gray-50/60 transition-colors">
-      <td className={`font-mono text-sm ${indent ? 'pl-6 pr-4 py-3' : 'px-4 py-3'} text-gray-700`}>
+      <td className={`font-mono text-sm ${indent ? 'pl-4 pr-3 py-2.5' : 'px-3 py-2.5'} text-gray-700`}>
         {needsModeration ? (
-          <span className="bg-amber-100 text-amber-800 rounded px-1 cursor-default" title="Resource needs moderation">
+          <button onClick={() => onGradeNow?.(r)} className="bg-amber-100 text-amber-800 rounded px-1 hover:bg-amber-200 transition-colors" title="Resource needs moderation">
             {r.resource_id}
-          </span>
+          </button>
         ) : isRemoved ? (
           <span className="bg-red-100 text-red-700 rounded px-1 cursor-default" title="Resource has been removed">
             {r.resource_id}
           </span>
         ) : (
-          r.resource_id
+          <button onClick={() => onGradeNow?.(r)} className="hover:underline" title="Open in marking panel">
+            {r.resource_id}
+          </button>
         )}
       </td>
-      <td className="px-4 py-3 text-sm text-center">
-        <span className={`inline-block text-xs font-medium px-2 py-0.5 rounded ${
+      <td className="px-2 py-2.5 text-sm text-center">
+        <span className={`inline-block text-xs font-medium px-1.5 py-0.5 rounded ${
           r.result_type === 'moderation'
             ? 'bg-amber-50 text-amber-700'
             : 'bg-slate-100 text-slate-600'
@@ -261,16 +318,35 @@ function SubmissionRow({ result: r, onEmailIndividual, onGradeNow, assignment, m
           {r.result_type === 'moderation' ? 'Moderation' : 'Resource'}
         </span>
       </td>
-      <td className="px-4 py-3 text-sm text-gray-800 tabular-nums text-center">
-        {r.status === 'error' ? (
-          <span className="text-red-400 text-xs font-medium">Error</span>
-        ) : isScaling ? (
-          <span>{formatScaled(scaledAi, assignment)}</span>
+      <td className="px-2 py-2.5 text-xs text-center whitespace-nowrap">
+        {(r.is_late || r.status === 'excluded') && !r.has_extension ? (
+          <span className={r.status === 'excluded' ? 'text-gray-400 italic' : 'text-orange-600 font-medium'}>
+            {r.submission_date ? formatSubmissionDate(r.submission_date) : null}
+            {r.seconds_late != null
+              ? <span className="block text-xs font-normal">({formatLateness(r.seconds_late)} late)</span>
+              : <span className="block">Late</span>}
+          </span>
         ) : (
-          aiRaw.toFixed(1)
+          <span className="text-gray-500">
+            {r.submission_date ? formatSubmissionDate(r.submission_date) : <span className="text-gray-400">No date</span>}
+            {r.has_extension && <span className="ml-1 text-xs bg-green-50 text-green-600 px-1 py-0.5 rounded">Extension</span>}
+          </span>
         )}
       </td>
-      <td className="px-4 py-3 text-sm tabular-nums text-center">
+      <td className="px-2 py-2.5 text-sm tabular-nums text-center">
+        {(r.criterion_grades ?? []).length === 0 ? (
+          <span className="text-gray-300">—</span>
+        ) : r.status === 'excluded' ? (
+          <span className="line-through text-gray-400">
+            {isScaling ? formatScaled(scaledAi, assignment) : aiRaw.toFixed(1)}
+          </span>
+        ) : isScaling ? (
+          <span className="text-gray-800">{formatScaled(scaledAi, assignment)}</span>
+        ) : (
+          <span className="text-gray-800">{aiRaw.toFixed(1)}</span>
+        )}
+      </td>
+      <td className="px-2 py-2.5 text-sm tabular-nums text-center">
         {teacherRaw !== null ? (
           <span className="text-gray-900 font-medium">
             {isScaling ? formatScaled(scaledTeacher, assignment) : teacherRaw.toFixed(1)}
@@ -279,8 +355,9 @@ function SubmissionRow({ result: r, onEmailIndividual, onGradeNow, assignment, m
           <span className="text-gray-300">—</span>
         )}
       </td>
-      <td className="px-4 py-3">
+      <td className="px-2 py-2.5">
         <div className="flex items-center justify-center gap-1">
+          {/* Eye icon — always available */}
           {onGradeNow && (
             <button
               onClick={() => onGradeNow(r)}
@@ -290,14 +367,90 @@ function SubmissionRow({ result: r, onEmailIndividual, onGradeNow, assignment, m
               <IconEye />
             </button>
           )}
-          <button
-            onClick={() => onEmailIndividual(r)}
-            disabled={r.status !== 'complete'}
-            title="Email grade"
-            className="p-1.5 rounded-md text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
-          >
-            <IconMail />
-          </button>
+
+          {r.status === 'excluded' ? (
+            /* Dismissed — show undo arrow */
+            <button
+              onClick={() => onUndoDismiss?.(r)}
+              title="Undo dismissal"
+              className="p-1.5 rounded-md text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors"
+            >
+              <IconUndo />
+            </button>
+          ) : r.has_extension ? (
+            /* Has extension — show grade status + undo arrow */
+            <>
+              {(r.criterion_grades ?? []).length > 0 ? (
+                <button
+                  onClick={() => onEmailIndividual(r)}
+                  disabled={r.status !== 'complete'}
+                  title="Email grade"
+                  className="p-1.5 rounded-md text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                >
+                  <IconMail />
+                </button>
+              ) : (
+                <span className="text-xs text-amber-600 font-medium whitespace-nowrap">No AI grade</span>
+              )}
+              <button
+                onClick={() => onRevokeExtension?.(r)}
+                title="Revoke extension"
+                className="p-1.5 rounded-md text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors"
+              >
+                <IconUndo />
+              </button>
+            </>
+          ) : r.is_late && (r.criterion_grades ?? []).length === 0 ? (
+            /* Late + ungraded — show Extension / Dismiss buttons */
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={() => onGrantExtension?.(r)}
+                title="Grant extension — allow AI grading"
+                className="text-xs text-indigo-600 hover:text-indigo-800 font-medium whitespace-nowrap"
+              >
+                Extension
+              </button>
+              <span className="text-gray-300">|</span>
+              <button
+                onClick={() => onAcknowledgeLate?.(r)}
+                title="Dismiss — no extension will be given"
+                className="text-xs text-gray-400 hover:text-gray-600 whitespace-nowrap"
+              >
+                Dismiss
+              </button>
+            </div>
+          ) : r.is_late ? (
+            /* Late but has AI grade — show warning + email */
+            <>
+              <span
+                title="This was submitted after the cutoff date"
+                className="text-red-500 font-bold text-sm cursor-default"
+              >!</span>
+              <button
+                onClick={() => onEmailIndividual(r)}
+                disabled={r.status !== 'complete'}
+                title="Email grade"
+                className="p-1.5 rounded-md text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+              >
+                <IconMail />
+              </button>
+            </>
+          ) : (r.criterion_grades ?? []).length === 0 ? (
+            /* Not late, no AI grade */
+            <div className="flex items-center gap-1.5">
+              <span className="text-xs text-amber-600 font-medium whitespace-nowrap">No AI grade</span>
+            </div>
+          ) : (
+            /* Normal — email icon */
+            <button
+              onClick={() => onEmailIndividual(r)}
+              disabled={r.status !== 'complete'}
+              title="Email grade"
+              className="p-1.5 rounded-md text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+            >
+              <IconMail />
+            </button>
+          )}
         </div>
       </td>
     </tr>
@@ -328,7 +481,7 @@ function SectionHeaderRow({ label, combined, colSpan, colorClass }) {
   )
 }
 
-export function StudentGradeTable({ results, emailDomain, onEmail, onEmailAll, onEmailTopic, onGradeNow, isSingleTopic = false, assignment, resourceRubric, moderationRubric }) {
+export function StudentGradeTable({ results, emailDomain, onEmail, onEmailAll, onEmailTopic, onGradeNow, onGrantExtension, onAcknowledgeLate, onUndoDismiss, onRevokeExtension, isSingleTopic = false, assignment, resourceRubric, moderationRubric }) {
   const [expandedStudentId, setExpandedStudentId] = useState(null)
   const maxPossibleResource = computeMaxPoints(resourceRubric)
   const maxPossibleModeration = computeMaxPoints(moderationRubric ?? resourceRubric)
@@ -446,6 +599,7 @@ export function StudentGradeTable({ results, emailDomain, onEmail, onEmailAll, o
         const studentResults = getStudentResults(student.id)
         const topicGroups = groupByTopic(studentResults)
         const hasComplete = studentResults.some((r) => r.status === 'complete')
+        const hasPendingLate = studentResults.some((r) => r.is_late && !r.has_extension && r.status !== 'excluded')
         const totalCount = studentResults.length
 
         return (
@@ -469,11 +623,14 @@ export function StudentGradeTable({ results, emailDomain, onEmail, onEmailAll, o
                 </div>
                 <span className="text-xs text-gray-400 flex-shrink-0">{totalCount} submission{totalCount !== 1 ? 's' : ''}</span>
               </div>
-              <div className="flex-shrink-0 ml-4" onClick={(e) => e.stopPropagation()}>
+              <div className="flex-shrink-0 ml-4 flex flex-col items-end gap-1" onClick={(e) => e.stopPropagation()}>
+                {hasPendingLate && (
+                  <span className="text-xs text-orange-600 font-medium whitespace-nowrap">Resolve late submission</span>
+                )}
                 {onEmailAll && (
                   <button
                     onClick={() => handleEmailAll(student.id)}
-                    disabled={emailingAll[student.id] || !hasComplete}
+                    disabled={emailingAll[student.id] || !hasComplete || hasPendingLate}
                     className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-gray-300 text-gray-600 bg-white hover:border-gray-400 hover:text-gray-800 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                   >
                     <IconMail />
@@ -489,6 +646,7 @@ export function StudentGradeTable({ results, emailDomain, onEmail, onEmailAll, o
                 {topicGroups.map(({ topic, resources, moderations }) => {
                   const topicKey = `${student.id}:${topic}`
                   const topicHasComplete = [...resources, ...moderations].some((r) => r.status === 'complete')
+                  const topicHasPendingLate = [...resources, ...moderations].some((r) => r.is_late && !r.has_extension && r.status !== 'excluded')
 
                   return (
                     <div key={topic} className="bg-white border border-gray-200 rounded-xl overflow-hidden shadow-sm">
@@ -499,6 +657,9 @@ export function StudentGradeTable({ results, emailDomain, onEmail, onEmailAll, o
                             <span className="text-xs font-semibold text-gray-700 tracking-wide uppercase">{topic}</span>
                           </div>
                           {onEmailTopic && (
+                            topicHasPendingLate ? (
+                              <span className="text-xs text-orange-600 font-medium whitespace-nowrap">Resolve late submission</span>
+                            ) : (
                             <button
                               onClick={() => handleEmailTopic(student.id, topic)}
                               disabled={emailingTopic[topicKey] || !topicHasComplete}
@@ -507,27 +668,37 @@ export function StudentGradeTable({ results, emailDomain, onEmail, onEmailAll, o
                               <IconMail />
                               {emailingTopic[topicKey] ? 'Sending…' : `Email ${topic}`}
                             </button>
+                            )
                           )}
                         </div>
                       )}
 
                       {/* Submission table — no vertical dividers */}
-                      <table className="w-full text-sm">
+                      <table className="w-full text-sm table-fixed">
+                        <colgroup>
+                          <col style={{width: '22%'}} />
+                          <col style={{width: '13%'}} />
+                          <col style={{width: '17%'}} />
+                          <col style={{width: '16%'}} />
+                          <col style={{width: '16%'}} />
+                          <col style={{width: '16%'}} />
+                        </colgroup>
                         <thead>
                           <tr className="border-b border-gray-100">
-                            <th className="px-4 py-2.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">ID</th>
-                            <th className="px-4 py-2.5 text-center text-xs font-semibold text-gray-500 uppercase tracking-wide">Type</th>
-                            <th className="px-4 py-2.5 text-center text-xs font-semibold text-gray-500 uppercase tracking-wide">AI Score</th>
-                            <th className="px-4 py-2.5 text-center text-xs font-semibold text-gray-500 uppercase tracking-wide">Teacher Score</th>
-                            <th className="px-4 py-2.5 text-center text-xs font-semibold text-gray-500 uppercase tracking-wide">Actions</th>
+                            <th className="px-3 py-2.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">ID</th>
+                            <th className="px-2 py-2.5 text-center text-xs font-semibold text-gray-500 uppercase tracking-wide">Type</th>
+                            <th className="px-2 py-2.5 text-center text-xs font-semibold text-gray-500 uppercase tracking-wide">Date</th>
+                            <th className="px-2 py-2.5 text-center text-xs font-semibold text-gray-500 uppercase tracking-wide">AI Score</th>
+                            <th className="px-2 py-2.5 text-center text-xs font-semibold text-gray-500 uppercase tracking-wide">Teacher Score</th>
+                            <th className="px-2 py-2.5 text-center text-xs font-semibold text-gray-500 uppercase tracking-wide">Actions</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-gray-50">
                           {sortRows(resources).map((r) => (
-                            <SubmissionRow key={r.id} result={r} onEmailIndividual={handleEmailIndividual} onGradeNow={onGradeNow} assignment={assignment} maxPossible={maxPossibleResource} />
+                            <SubmissionRow key={r.id} result={r} onEmailIndividual={handleEmailIndividual} onGradeNow={onGradeNow} onGrantExtension={onGrantExtension} onAcknowledgeLate={onAcknowledgeLate} onUndoDismiss={onUndoDismiss} onRevokeExtension={onRevokeExtension} assignment={assignment} maxPossible={maxPossibleResource} />
                           ))}
                           {sortRows(moderations).map((r) => (
-                            <SubmissionRow key={r.id} result={r} onEmailIndividual={handleEmailIndividual} onGradeNow={onGradeNow} assignment={assignment} maxPossible={maxPossibleModeration} />
+                            <SubmissionRow key={r.id} result={r} onEmailIndividual={handleEmailIndividual} onGradeNow={onGradeNow} onGrantExtension={onGrantExtension} onAcknowledgeLate={onAcknowledgeLate} onUndoDismiss={onUndoDismiss} onRevokeExtension={onRevokeExtension} assignment={assignment} maxPossible={maxPossibleModeration} />
                           ))}
                         </tbody>
                       </table>
@@ -569,11 +740,16 @@ function SortableHeader({ col, label, sortCol, sortDir, onSort, align = 'left' }
 
 export function StudentOverviewTable({
   results,
+  allTopics = [],
   emailDomain,
   onEmail,
   onEmailAll,
   onEmailTopic,
   onGradeNow,
+  onGrantExtension,
+  onAcknowledgeLate,
+  onUndoDismiss,
+  onRevokeExtension,
   assignment,
   resourceRubric,
   moderationRubric,
@@ -590,6 +766,10 @@ export function StudentOverviewTable({
   const maxPossibleResource = computeMaxPoints(resourceRubric)
   const maxPossibleModeration = computeMaxPoints(moderationRubric ?? resourceRubric)
   const isRnM = assignment?.assignment_type === 'resources_and_moderations'
+  const topicNames = useMemo(() => {
+    const names = (allTopics || []).map((t) => typeof t === 'string' ? t : t?.topic).filter(Boolean)
+    return [...new Set(names)]
+  }, [allTopics])
 
   const students = useMemo(() => {
     const map = new Map()
@@ -616,24 +796,96 @@ export function StudentOverviewTable({
     return { resInfo, resTeacher, modInfo, modTeacher }
   }
 
-  function overallValue(resInfo, modInfo) {
+  function getConfiguredDisplayInfo(resultType) {
+    const eff = getEffectiveAssignment(assignment, resultType)
+    const rawMax = resultType === 'moderation' ? maxPossibleModeration : maxPossibleResource
+    return {
+      max: eff?.grade_scale_enabled && eff?.grade_scale_max ? Number(eff.grade_scale_max) : rawMax,
+      dp: Math.max(eff?.grade_decimal_places ?? 1, 1),
+    }
+  }
+
+  function topicOverallBundle(resInfo, modInfo) {
     const r = resInfo?.grade ?? null
     const m = modInfo?.grade ?? null
     if (r === null && m === null) return null
-    return (r ?? 0) + (m ?? 0)
+
+    const resCfg = getConfiguredDisplayInfo('resource')
+    const modCfg = getConfiguredDisplayInfo('moderation')
+
+    if (!isRnM) {
+      return {
+        value: r ?? 0,
+        max: resCfg.max,
+        dp: Math.max(resInfo?.effectiveAssignment?.grade_decimal_places ?? resCfg.dp, 1),
+      }
+    }
+
+    return {
+      value: (r ?? 0) + (m ?? 0),
+      max: resCfg.max + modCfg.max,
+      dp: Math.max(
+        resInfo?.effectiveAssignment?.grade_decimal_places ?? resCfg.dp,
+        modInfo?.effectiveAssignment?.grade_decimal_places ?? modCfg.dp,
+        1,
+      ),
+    }
   }
 
-  function formatOverall(resInfo, modInfo) {
-    if (!isRnM) return formatCombinedGrade(resInfo) ?? '—'
-    const total = overallValue(resInfo, modInfo)
-    if (total === null) return '—'
-    const resEff = resInfo?.effectiveAssignment
-    const modEff = modInfo?.effectiveAssignment
-    const dp = Math.max(resEff?.grade_decimal_places ?? 1, 1)
-    if (resEff?.grade_scale_enabled && resEff?.grade_scale_max && modEff?.grade_scale_enabled && modEff?.grade_scale_max) {
-      return `${total.toFixed(dp)} / ${Number(resEff.grade_scale_max) + Number(modEff.grade_scale_max)}`
+  function zeroOverallBundle() {
+    const resCfg = getConfiguredDisplayInfo('resource')
+    if (!isRnM) {
+      return { value: 0, max: resCfg.max, dp: resCfg.dp }
     }
-    return total.toFixed(dp)
+    const modCfg = getConfiguredDisplayInfo('moderation')
+    return {
+      value: 0,
+      max: resCfg.max + modCfg.max,
+      dp: Math.max(resCfg.dp, modCfg.dp, 1),
+    }
+  }
+
+  function getAggregateOverall(student, useTeacher = false) {
+    if (topicFilter) {
+      const grades = getGrades(student)
+      return topicOverallBundle(useTeacher ? grades.resTeacher : grades.resInfo, useTeacher ? grades.modTeacher : grades.modInfo)
+    }
+
+    const names = topicNames.length > 0
+      ? topicNames
+      : groupByTopicLocal([...student.resources, ...student.moderations]).map((g) => g.topic)
+
+    if (names.length === 0) return null
+
+    let totalValue = 0
+    let totalMax = 0
+    let dp = 1
+    for (const topic of names) {
+      const resources = student.resources.filter((r) => ((r.resource_topics ?? '').trim() || 'No Topic') === topic)
+      const moderations = student.moderations.filter((r) => ((r.resource_topics ?? '').trim() || 'No Topic') === topic)
+      if (resources.length === 0 && moderations.length === 0) {
+        const bundle = zeroOverallBundle()
+        totalValue += bundle.value
+        totalMax += bundle.max
+        dp = Math.max(dp, bundle.dp ?? 1)
+        continue
+      }
+      const resInfo = computeStudentCombined(resources, assignment?.combine_resource_max_n ?? null, maxPossibleResource, assignment, useTeacher, 'resource')
+      const modInfo = isRnM ? computeStudentCombined(moderations, assignment?.combine_moderation_max_n ?? null, maxPossibleModeration, assignment, useTeacher, 'moderation') : null
+      const bundle = topicOverallBundle(resInfo, modInfo)
+      if (!bundle) return null
+      totalValue += bundle.value
+      totalMax += bundle.max
+      dp = Math.max(dp, bundle.dp ?? 1)
+    }
+    return { value: totalValue, max: totalMax, dp }
+  }
+
+  function formatOverallBundle(bundle) {
+    if (!bundle) return '—'
+    const dp = bundle.dp ?? 1
+    const fmt = (n) => Number(n.toFixed(dp)).toString()
+    return `${fmt(bundle.value)} / ${fmt(bundle.max)}`
   }
 
   function handleSort(col) {
@@ -658,13 +910,9 @@ export function StudentOverviewTable({
       } else if (sortCol === 'id') {
         cmp = (a.id || '').localeCompare(b.id || '')
       } else if (sortCol === 'aiGrade') {
-        const ga = getGrades(a)
-        const gb = getGrades(b)
-        cmp = (overallValue(ga.resInfo, ga.modInfo) ?? -Infinity) - (overallValue(gb.resInfo, gb.modInfo) ?? -Infinity)
+        cmp = (getAggregateOverall(a, false)?.value ?? -Infinity) - (getAggregateOverall(b, false)?.value ?? -Infinity)
       } else if (sortCol === 'teacherGrade') {
-        const ga = getGrades(a)
-        const gb = getGrades(b)
-        cmp = (overallValue(ga.resTeacher, ga.modTeacher) ?? -Infinity) - (overallValue(gb.resTeacher, gb.modTeacher) ?? -Infinity)
+        cmp = (getAggregateOverall(a, true)?.value ?? -Infinity) - (getAggregateOverall(b, true)?.value ?? -Infinity)
       } else if (sortCol === 'submissions') {
         cmp = (a.resources.length + a.moderations.length) - (b.resources.length + b.moderations.length)
       }
@@ -762,7 +1010,7 @@ export function StudentOverviewTable({
             <col style={{width: '11%'}} />
             <col style={{width: '20%'}} />
           </colgroup>
-          <thead className="sticky top-0 z-10">
+          <thead className="sticky top-0 z-10 bg-gray-50">
             <tr className="border-b border-gray-200">
               <SortableHeader col="name" label="Student Name" sortCol={sortCol} sortDir={sortDir} onSort={handleSort} />
               <SortableHeader col="id" label="Student ID" sortCol={sortCol} sortDir={sortDir} onSort={handleSort} />
@@ -776,10 +1024,14 @@ export function StudentOverviewTable({
           </thead>
           <tbody>
             {sortedStudents.map((student) => {
-              const grades = getGrades(student)
               const isExpanded = expandedStudentId === student.id
               const hasComplete = [...student.resources, ...student.moderations].some((r) => r.status === 'complete')
+              const hasUngraded = [...student.resources, ...student.moderations].some((r) => (r.criterion_grades ?? []).length === 0 && r.status !== 'error' && r.status !== 'excluded' && !(r.is_late && r.has_extension))
+              const hasError = [...student.resources, ...student.moderations].some((r) => r.status === 'error')
+              const hasPendingLate = [...student.resources, ...student.moderations].some((r) => r.is_late && !r.has_extension && r.status !== 'excluded')
               const totalSubs = student.resources.length + student.moderations.length
+              const overallAi = getAggregateOverall(student, false)
+              const overallTeacher = getAggregateOverall(student, true)
 
               return (
                 <Fragment key={student.id}>
@@ -799,22 +1051,33 @@ export function StudentOverviewTable({
                     </td>
                     <td className="px-4 py-3 font-mono text-xs text-gray-500">{student.name ? student.id : '—'}</td>
                     <td className="px-4 py-3 text-center tabular-nums text-gray-800">
-                      {formatOverall(grades.resInfo, grades.modInfo)}
+                      {formatOverallBundle(overallAi)}
                     </td>
                     <td className="px-4 py-3 text-center tabular-nums text-emerald-700 font-medium">
-                      {formatOverall(grades.resTeacher, grades.modTeacher)}
+                      {formatOverallBundle(overallTeacher)}
                     </td>
                     <td className="px-4 py-3 text-center text-gray-500">{totalSubs}</td>
                     <td className="px-4 py-3 text-center" onClick={(e) => e.stopPropagation()}>
                       {onEmailAll && (
-                        <button
-                          onClick={() => handleEmailRow(student)}
-                          disabled={emailingAll[student.id] || !hasComplete}
-                          className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-lg border border-gray-300 text-gray-600 bg-white hover:border-gray-400 hover:text-gray-800 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-                        >
-                          <IconMail />
-                          {emailingAll[student.id] ? 'Sending…' : (topicFilter ? `Email ${topicFilter}` : 'Email All')}
-                        </button>
+                        <div className="flex flex-col items-center gap-1">
+                          {hasPendingLate && (
+                            <span className="text-xs text-orange-600 font-medium whitespace-nowrap">Resolve late submission</span>
+                          )}
+                          {hasUngraded && (
+                            <span className="text-xs text-amber-600 font-medium whitespace-nowrap">AI grade missing</span>
+                          )}
+                          {hasError && (
+                            <span className="text-xs text-red-600 font-medium whitespace-nowrap">AI grade error</span>
+                          )}
+                          <button
+                            onClick={() => handleEmailRow(student)}
+                            disabled={emailingAll[student.id] || !hasComplete || hasPendingLate || hasUngraded || hasError}
+                            className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-lg border border-gray-300 text-gray-600 bg-white hover:border-gray-400 hover:text-gray-800 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                          >
+                            <IconMail />
+                            {emailingAll[student.id] ? 'Sending…' : (topicFilter ? `Email ${topicFilter}` : 'Email All')}
+                          </button>
+                        </div>
                       )}
                     </td>
                   </tr>
@@ -825,35 +1088,46 @@ export function StudentOverviewTable({
                         <div className="rounded-xl border border-gray-200 overflow-hidden shadow-sm bg-white">
                           <table className="w-full text-sm table-fixed">
                             <colgroup>
-                              <col style={{width: '25%'}} />
-                              <col style={{width: '15%'}} />
-                              <col style={{width: '20%'}} />
                               <col style={{width: '22%'}} />
-                              <col style={{width: '18%'}} />
+                              <col style={{width: '13%'}} />
+                              <col style={{width: '17%'}} />
+                              <col style={{width: '16%'}} />
+                              <col style={{width: '16%'}} />
+                              <col style={{width: '16%'}} />
                             </colgroup>
                             <thead>
                               <tr className="border-b border-gray-200 bg-gray-50">
-                                <th className="px-4 py-2.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">ID</th>
-                                <th className="px-4 py-2.5 text-center text-xs font-semibold text-gray-500 uppercase tracking-wide">Type</th>
-                                <th className="px-4 py-2.5 text-center text-xs font-semibold text-gray-500 uppercase tracking-wide">AI Score</th>
-                                <th className="px-4 py-2.5 text-center text-xs font-semibold text-gray-500 uppercase tracking-wide">Teacher Score</th>
-                                <th className="px-4 py-2.5 text-center text-xs font-semibold text-gray-500 uppercase tracking-wide">Actions</th>
+                                <th className="pl-4 pr-3 py-2.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">ID</th>
+                                <th className="px-2 py-2.5 text-center text-xs font-semibold text-gray-500 uppercase tracking-wide">Type</th>
+                                <th className="px-2 py-2.5 text-center text-xs font-semibold text-gray-500 uppercase tracking-wide">Date</th>
+                                <th className="px-2 py-2.5 text-center text-xs font-semibold text-gray-500 uppercase tracking-wide">AI Score</th>
+                                <th className="px-2 py-2.5 text-center text-xs font-semibold text-gray-500 uppercase tracking-wide">Teacher Score</th>
+                                <th className="px-2 py-2.5 text-center text-xs font-semibold text-gray-500 uppercase tracking-wide">Actions</th>
                               </tr>
                             </thead>
                             <tbody>
                               {groupByTopicLocal([...student.resources, ...student.moderations]).map(({ topic, resources, moderations }, topicIdx) => {
                                 const topicKey = `${student.id}:${topic}`
                                 const topicHasComplete = [...resources, ...moderations].some((r) => r.status === 'complete')
+                                const topicHasUngraded = [...resources, ...moderations].some((r) => (r.criterion_grades ?? []).length === 0 && r.status !== 'error' && r.status !== 'excluded' && !(r.is_late && r.has_extension))
+                                const topicHasError = [...resources, ...moderations].some((r) => r.status === 'error')
+                                const topicHasPendingLate = [...resources, ...moderations].some((r) => r.is_late && !r.has_extension && r.status !== 'excluded')
                                 const resSectionCombined = getCombinedLocal(resources, assignment?.combine_resource_max_n ?? null, maxPossibleResource, 'resource')
                                 const modSectionCombined = getCombinedLocal(moderations, assignment?.combine_moderation_max_n ?? null, maxPossibleModeration, 'moderation')
                                 return (
                                   <Fragment key={topic}>
                                     {/* Topic header row */}
                                     <tr className={`bg-indigo-50/60 border-b border-gray-300 ${topicIdx > 0 ? 'border-t-2 border-gray-300' : ''}`}>
-                                      <td colSpan={4} className="px-4 py-2">
+                                      <td colSpan={5} className="px-4 py-2">
                                         <div className="flex items-center gap-2 flex-wrap">
                                           <span className="text-xs font-semibold text-indigo-800 uppercase tracking-wide">{topic}</span>
+                                          {topicHasUngraded && (
+                                            <span className="text-xs font-medium text-amber-700 bg-amber-100 px-1.5 py-0.5 rounded">AI grade missing</span>
+                                          )}
+
                                           {(() => {
+                                            const combinedAi = topicOverallBundle(resSectionCombined?.ai, modSectionCombined?.ai)
+                                            const combinedTeacher = topicOverallBundle(resSectionCombined?.teacher, modSectionCombined?.teacher)
                                             const resAi = formatCombinedGrade(resSectionCombined?.ai)
                                             const modAi = formatCombinedGrade(modSectionCombined?.ai)
                                             const resTeacher = formatCombinedGrade(resSectionCombined?.teacher)
@@ -861,9 +1135,11 @@ export function StudentOverviewTable({
                                             const dot = <span className="text-indigo-300 mx-0.5">·</span>
                                             return (
                                               <>
+                                                {combinedAi && <>{dot}<span className="text-xs text-indigo-700 font-semibold">Combined {formatOverallBundle(combinedAi)}</span></>}
                                                 {!isRnM && resAi && <>{dot}<span className="text-xs text-indigo-600 font-medium">AI {resAi}</span></>}
                                                 {isRnM && resAi && <>{dot}<span className="text-xs text-indigo-600 font-medium">Resource {resAi}</span></>}
                                                 {isRnM && modAi && <>{dot}<span className="text-xs text-indigo-600 font-medium">Moderation {modAi}</span></>}
+                                                {combinedTeacher && <>{dot}<span className="text-xs text-emerald-700 font-semibold">Teacher {formatOverallBundle(combinedTeacher)}</span></>}
                                                 {!isRnM && resTeacher && <>{dot}<span className="text-xs text-emerald-700 font-medium">Teacher {resTeacher}</span></>}
                                                 {isRnM && resTeacher && <>{dot}<span className="text-xs text-emerald-700 font-medium">Res Teacher {resTeacher}</span></>}
                                                 {isRnM && modTeacher && <>{dot}<span className="text-xs text-emerald-700 font-medium">Mod Teacher {modTeacher}</span></>}
@@ -874,28 +1150,34 @@ export function StudentOverviewTable({
                                       </td>
                                       <td className="px-3 py-2 text-center">
                                         {onEmailTopic && (
-                                          <button
-                                            onClick={() => handleEmailTopicBtn(student.id, topic)}
-                                            disabled={emailingTopic[topicKey] || !topicHasComplete}
-                                            title={`Email ${topic}`}
-                                            className="inline-flex items-center justify-center p-2 rounded-md text-indigo-500 hover:text-indigo-700 hover:bg-indigo-100 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-                                          >
-                                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-5 h-5">
-                                              <path strokeLinecap="round" strokeLinejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 01-2.25 2.25h-15a2.25 2.25 0 01-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0019.5 4.5h-15a2.25 2.25 0 00-2.25 2.25m19.5 0v.243a2.25 2.25 0 01-1.07 1.916l-7.5 4.615a2.25 2.25 0 01-2.36 0L3.32 8.91a2.25 2.25 0 01-1.07-1.916V6.75" />
-                                            </svg>
-                                          </button>
+                                          topicHasPendingLate ? (
+                                            <span className="text-xs text-orange-600 font-medium whitespace-nowrap">Resolve late submission</span>
+                                          ) : topicHasUngraded || topicHasError ? (
+                                            <span className="text-xs text-amber-600 font-medium whitespace-nowrap">Resolve AI issue</span>
+                                          ) : (
+                                            <button
+                                              onClick={() => handleEmailTopicBtn(student.id, topic)}
+                                              disabled={emailingTopic[topicKey] || !topicHasComplete}
+                                              title={`Email ${topic}`}
+                                              className="inline-flex items-center justify-center p-2 rounded-md text-indigo-500 hover:text-indigo-700 hover:bg-indigo-100 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                                            >
+                                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-5 h-5">
+                                                <path strokeLinecap="round" strokeLinejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 01-2.25 2.25h-15a2.25 2.25 0 01-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0019.5 4.5h-15a2.25 2.25 0 00-2.25 2.25m19.5 0v.243a2.25 2.25 0 01-1.07 1.916l-7.5 4.615a2.25 2.25 0 01-2.36 0L3.32 8.91a2.25 2.25 0 01-1.07-1.916V6.75" />
+                                              </svg>
+                                            </button>
+                                          )
                                         )}
                                       </td>
                                     </tr>
 
                                     {/* Resource rows */}
                                     {sortRows(resources).map((r) => (
-                                      <SubmissionRow key={r.id} result={r} onEmailIndividual={handleEmailIndividual} onGradeNow={onGradeNow} assignment={assignment} maxPossible={maxPossibleResource} indent />
+                                      <SubmissionRow key={r.id} result={r} onEmailIndividual={handleEmailIndividual} onGradeNow={onGradeNow} onGrantExtension={onGrantExtension} onAcknowledgeLate={onAcknowledgeLate} onUndoDismiss={onUndoDismiss} onRevokeExtension={onRevokeExtension} assignment={assignment} maxPossible={maxPossibleResource} indent />
                                     ))}
 
                                     {/* Moderation rows */}
                                     {sortRows(moderations).map((r) => (
-                                      <SubmissionRow key={r.id} result={r} onEmailIndividual={handleEmailIndividual} onGradeNow={onGradeNow} assignment={assignment} maxPossible={maxPossibleModeration} indent />
+                                      <SubmissionRow key={r.id} result={r} onEmailIndividual={handleEmailIndividual} onGradeNow={onGradeNow} onGrantExtension={onGrantExtension} onAcknowledgeLate={onAcknowledgeLate} onUndoDismiss={onUndoDismiss} onRevokeExtension={onRevokeExtension} assignment={assignment} maxPossible={maxPossibleModeration} indent />
                                     ))}
                                   </Fragment>
                                 )
@@ -992,8 +1274,8 @@ export function GradeResultsTable({ results, type, expandedResult, setExpandedRe
                   )}
                 </td>
                 <td className="px-4 py-3 text-gray-800 font-medium">
-                  {r.status === 'error' ? (
-                    <span className="text-red-500">Error</span>
+                  {(r.criterion_grades ?? []).length === 0 ? (
+                    <span className="text-gray-300">—</span>
                   ) : (
                     aiScore.toFixed(1)
                   )}
@@ -1008,15 +1290,31 @@ export function GradeResultsTable({ results, type, expandedResult, setExpandedRe
                 {onEmail && (
                   <td className="px-4 py-3 w-32" onClick={(e) => e.stopPropagation()}>
                     <div className="flex flex-col gap-1">
-                      <button
-                        onClick={(e) => handleEmail(e, r)}
-                        disabled={r.status !== 'complete'}
-                        className="px-2.5 py-1 text-xs rounded-lg border border-indigo-300 text-indigo-600 hover:bg-indigo-50 disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
-                      >
-                        Email Student
-                      </button>
-                      {emailError[r.id] && (
-                        <span className="text-xs text-red-500 leading-tight">{emailError[r.id]}</span>
+                      {(r.criterion_grades ?? []).length === 0 && r.status !== 'error' ? (
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-xs text-amber-600 font-medium whitespace-nowrap">No AI grade</span>
+                          {onGradeNow && (
+                            <button
+                              onClick={(e) => { e.stopPropagation(); onGradeNow(r) }}
+                              className="text-xs text-amber-700 underline hover:no-underline whitespace-nowrap"
+                            >
+                              Redo
+                            </button>
+                          )}
+                        </div>
+                      ) : (
+                        <>
+                          <button
+                            onClick={(e) => handleEmail(e, r)}
+                            disabled={r.status !== 'complete'}
+                            className="px-2.5 py-1 text-xs rounded-lg border border-indigo-300 text-indigo-600 hover:bg-indigo-50 disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
+                          >
+                            Email Student
+                          </button>
+                          {emailError[r.id] && (
+                            <span className="text-xs text-red-500 leading-tight">{emailError[r.id]}</span>
+                          )}
+                        </>
                       )}
                     </div>
                   </td>
@@ -1090,7 +1388,7 @@ export function GradeResultsTable({ results, type, expandedResult, setExpandedRe
 // Teacher grading panel — resources and moderations, one at a time
 // ---------------------------------------------------------------------------
 
-export function TeacherGradingPanel({ resourceQueue, moderationQueue, resourceRubric, moderationRubric, onSave, isRnM, startAtResultId }) {
+export function TeacherGradingPanel({ resourceQueue, moderationQueue, resourceRubric, moderationRubric, onSave, onRedoGrade, isRnM, startAtResultId }) {
   const [activeType, setActiveType] = useState('resource')
   const [resourceIdx, setResourceIdx] = useState(() =>
     Math.max(0, resourceQueue.findIndex((r) => !r.teacher_graded_at))
@@ -1101,10 +1399,15 @@ export function TeacherGradingPanel({ resourceQueue, moderationQueue, resourceRu
   const [selectedLevels, setSelectedLevels] = useState({})
   const [criterionFeedback, setCriterionFeedback] = useState({})
   const [saving, setSaving] = useState(false)
+  const [isDirty, setIsDirty] = useState(false)
   const [showOriginal, setShowOriginal] = useState(false)
-  const [lastJumpedId, setLastJumpedId] = useState(null)
   const [hideAi, setHideAi] = useState(() => localStorage.getItem('teacher_hide_ai_grade') === 'true')
   const [hideFeedback, setHideFeedback] = useState(() => localStorage.getItem('teacher_hide_ai_feedback') === 'true')
+  const [redoOpen, setRedoOpen] = useState(false)
+  const [redoAmendment, setRedoAmendment] = useState('')
+  const [redoing, setRedoing] = useState(false)
+  // Tracks the result ID that should open the redo panel on load (set when Fix is clicked)
+  const openRedoPanelForId = useRef(null)
 
   function toggleHideAi() {
     setHideAi((prev) => {
@@ -1124,16 +1427,24 @@ export function TeacherGradingPanel({ resourceQueue, moderationQueue, resourceRu
 
   // When startAtResultId changes, jump to that result in the queue
   useEffect(() => {
-    if (!startAtResultId || startAtResultId === lastJumpedId) return
-    setLastJumpedId(startAtResultId)
-    const resIdx = resourceQueue.findIndex((r) => r.id === startAtResultId)
+    if (!startAtResultId) return
+    const targetId = startAtResultId.id
+    const resIdx = resourceQueue.findIndex((r) => r.id === targetId)
     if (resIdx >= 0) {
+      const target = resourceQueue[resIdx]
+      if ((target.criterion_grades ?? []).length === 0) {
+        openRedoPanelForId.current = targetId
+      }
       setActiveType('resource')
       setResourceIdx(resIdx)
       return
     }
-    const modIdx = moderationQueue.findIndex((r) => r.id === startAtResultId)
+    const modIdx = moderationQueue.findIndex((r) => r.id === targetId)
     if (modIdx >= 0) {
+      const target = moderationQueue[modIdx]
+      if ((target.criterion_grades ?? []).length === 0) {
+        openRedoPanelForId.current = targetId
+      }
       setActiveType('moderation')
       setModerationIdx(modIdx)
     }
@@ -1147,6 +1458,7 @@ export function TeacherGradingPanel({ resourceQueue, moderationQueue, resourceRu
 
   useEffect(() => {
     if (!current) return
+    let cancelled = false
     if (current.teacher_criterion_grades?.length) {
       const levels = {}
       const feedbacks = {}
@@ -1161,7 +1473,24 @@ export function TeacherGradingPanel({ resourceQueue, moderationQueue, resourceRu
       setCriterionFeedback({})
     }
     setShowOriginal(false)
-  }, [current?.id, activeType])
+    setIsDirty(false)
+    setRedoAmendment('')
+    const noGrades = (current.criterion_grades ?? []).length === 0
+    const isFixJump = openRedoPanelForId.current === current.id
+    if (isFixJump) openRedoPanelForId.current = null
+    if ((isFixJump && noGrades) || current.status === 'error') {
+      // Came from Fix button, or AI errored — open redo panel so teacher can add context
+      setRedoOpen(true)
+    } else {
+      setRedoOpen(false)
+      // Auto-trigger AI grading when this result has no AI grade (normal navigation)
+      if (noGrades && onRedoGrade) {
+        setRedoing(true)
+        onRedoGrade(current.id, null).catch(() => {}).finally(() => { if (!cancelled) setRedoing(false) })
+      }
+    }
+    return () => { cancelled = true }
+  }, [current?.id, activeType]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const aiGradeMap = {}
   ;(current?.criterion_grades ?? []).forEach((g) => { aiGradeMap[g.criterion_id] = g })
@@ -1195,8 +1524,24 @@ export function TeacherGradingPanel({ resourceQueue, moderationQueue, resourceRu
   }
 
   function handleSkip() {
+    if (isDirty && !window.confirm('You have unsaved changes. Skip without saving?')) return
     const nextIdx = currentIdx + 1
     if (nextIdx < queue.length) setCurrentIdx(nextIdx)
+  }
+
+  function handlePrev() {
+    if (isDirty && !window.confirm('You have unsaved changes. Go back without saving?')) return
+    if (currentIdx > 0) setCurrentIdx(currentIdx - 1)
+  }
+
+  function handleNext() {
+    if (isDirty && !window.confirm('You have unsaved changes. Continue without saving?')) return
+    if (currentIdx + 1 < queue.length) setCurrentIdx(currentIdx + 1)
+  }
+
+  function handleSwitchType(type) {
+    if (isDirty && !window.confirm('You have unsaved changes. Switch without saving?')) return
+    setActiveType(type)
   }
 
   const isLast = currentIdx + 1 >= queue.length
@@ -1211,7 +1556,7 @@ export function TeacherGradingPanel({ resourceQueue, moderationQueue, resourceRu
       {isRnM && (resourceQueue.length > 0 || moderationQueue.length > 0) && (
         <div className="flex gap-2 mb-5">
           <button
-            onClick={() => setActiveType('resource')}
+            onClick={() => handleSwitchType('resource')}
             className={`px-3 py-1.5 text-sm rounded-lg font-medium transition-colors ${
               activeType === 'resource' ? 'bg-indigo-100 text-indigo-700' : 'text-gray-500 hover:bg-gray-100'
             }`}
@@ -1220,7 +1565,7 @@ export function TeacherGradingPanel({ resourceQueue, moderationQueue, resourceRu
             <span className="ml-1.5 text-xs opacity-60">{resGraded}/{resourceQueue.length}</span>
           </button>
           <button
-            onClick={() => setActiveType('moderation')}
+            onClick={() => handleSwitchType('moderation')}
             className={`px-3 py-1.5 text-sm rounded-lg font-medium transition-colors ${
               activeType === 'moderation' ? 'bg-indigo-100 text-indigo-700' : 'text-gray-500 hover:bg-gray-100'
             }`}
@@ -1248,6 +1593,28 @@ export function TeacherGradingPanel({ resourceQueue, moderationQueue, resourceRu
               <span className="font-semibold">{currentIdx + 1}</span> of {queue.length}
               <span className="ml-2 text-gray-400">({gradedCount} graded)</span>
             </span>
+            <div className="flex items-center gap-1">
+              <button
+                onClick={handlePrev}
+                disabled={currentIdx === 0}
+                title="Previous"
+                className="p-1.5 rounded-lg border border-gray-300 text-gray-500 hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-4 h-4">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
+                </svg>
+              </button>
+              <button
+                onClick={handleNext}
+                disabled={currentIdx + 1 >= queue.length}
+                title="Next"
+                className="p-1.5 rounded-lg border border-gray-300 text-gray-500 hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-4 h-4">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+                </svg>
+              </button>
+            </div>
           </div>
 
           {activeType === 'resource' ? (
@@ -1324,54 +1691,121 @@ export function TeacherGradingPanel({ resourceQueue, moderationQueue, resourceRu
           {rubric?.criteria ? (
             <div className="mb-5">
               <div className="flex items-center justify-end gap-2 mb-2">
+                {/* Redo AI grade — always shown when feature is available */}
+                {onRedoGrade && (
+                  <button
+                    onClick={() => { setRedoOpen((o) => !o); setRedoAmendment('') }}
+                    className={`flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-lg border transition-colors ${
+                      redoOpen
+                        ? 'bg-amber-100 border-amber-300 text-amber-800'
+                        : 'bg-amber-50 border-amber-200 text-amber-700 hover:bg-amber-100'
+                    }`}
+                  >
+                    {redoing ? (
+                      <svg className="w-3.5 h-3.5 animate-spin" viewBox="0 0 24 24" fill="none">
+                        <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" strokeDasharray="40 20" />
+                      </svg>
+                    ) : (
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" className="w-3.5 h-3.5">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" />
+                      </svg>
+                    )}
+                    Redo AI grade
+                  </button>
+                )}
+
                 {/* Hide AI feedback — disabled when grade is already hidden */}
-                <button
-                  onClick={toggleHideFeedback}
-                  disabled={hideAi}
-                  title={hideAi ? 'AI grade is already hidden' : undefined}
-                  className={`flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-lg border transition-colors ${
-                    hideAi
-                      ? 'border-gray-200 text-gray-300 cursor-not-allowed bg-white'
-                      : hideFeedback
-                      ? 'bg-gray-100 border-gray-300 text-gray-600 hover:bg-gray-200'
-                      : 'bg-indigo-50 border-indigo-200 text-indigo-700 hover:bg-indigo-100'
-                  }`}
-                >
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" className="w-3.5 h-3.5">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M7.5 8.25h9m-9 3H12m-9.75 1.51c0 1.6 1.123 2.994 2.707 3.227 1.129.166 2.27.293 3.423.379.35.026.67.21.865.501L12 21l2.755-4.133a1.14 1.14 0 01.865-.501 48.172 48.172 0 003.423-.379c1.584-.233 2.707-1.626 2.707-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0012 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018z" />
-                  </svg>
-                  {hideFeedback || hideAi ? 'Feedback hidden' : 'Hide AI feedback'}
-                </button>
+                {(current?.criterion_grades ?? []).length > 0 && (
+                  <button
+                    onClick={toggleHideFeedback}
+                    disabled={hideAi}
+                    title={hideAi ? 'AI grade is already hidden' : undefined}
+                    className={`flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-lg border transition-colors ${
+                      hideAi
+                        ? 'border-gray-200 text-gray-300 cursor-not-allowed bg-white'
+                        : hideFeedback
+                        ? 'bg-gray-100 border-gray-300 text-gray-600 hover:bg-gray-200'
+                        : 'bg-indigo-50 border-indigo-200 text-indigo-700 hover:bg-indigo-100'
+                    }`}
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" className="w-3.5 h-3.5">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M7.5 8.25h9m-9 3H12m-9.75 1.51c0 1.6 1.123 2.994 2.707 3.227 1.129.166 2.27.293 3.423.379.35.026.67.21.865.501L12 21l2.755-4.133a1.14 1.14 0 01.865-.501 48.172 48.172 0 003.423-.379c1.584-.233 2.707-1.626 2.707-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0012 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018z" />
+                    </svg>
+                    {hideFeedback || hideAi ? 'Feedback hidden' : 'Hide AI feedback'}
+                  </button>
+                )}
 
                 {/* Hide AI grade */}
-                <button
-                  onClick={toggleHideAi}
-                  className={`flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-lg border transition-colors ${
-                    hideAi
-                      ? 'bg-gray-100 border-gray-300 text-gray-600 hover:bg-gray-200'
-                      : 'bg-indigo-50 border-indigo-200 text-indigo-700 hover:bg-indigo-100'
-                  }`}
-                >
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" className="w-3.5 h-3.5">
-                    {hideAi
-                      ? <path strokeLinecap="round" strokeLinejoin="round" d="M3.98 8.223A10.477 10.477 0 001.934 12C3.226 16.338 7.244 19.5 12 19.5c.993 0 1.953-.138 2.863-.395M6.228 6.228A10.45 10.45 0 0112 4.5c4.756 0 8.773 3.162 10.065 7.498a10.523 10.523 0 01-4.293 5.774M6.228 6.228L3 3m3.228 3.228l3.65 3.65m7.894 7.894L21 21m-3.228-3.228l-3.65-3.65m0 0a3 3 0 10-4.243-4.243m4.242 4.242L9.88 9.88" />
-                      : <><path strokeLinecap="round" strokeLinejoin="round" d="M2.036 12.322a1.012 1.012 0 010-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178z" /><path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /></>
-                    }
-                  </svg>
-                  {hideAi ? 'AI grade hidden' : 'Hide AI grade'}
-                </button>
+                {(current?.criterion_grades ?? []).length > 0 && (
+                  <button
+                    onClick={toggleHideAi}
+                    className={`flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-lg border transition-colors ${
+                      hideAi
+                        ? 'bg-gray-100 border-gray-300 text-gray-600 hover:bg-gray-200'
+                        : 'bg-indigo-50 border-indigo-200 text-indigo-700 hover:bg-indigo-100'
+                    }`}
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" className="w-3.5 h-3.5">
+                      {hideAi
+                        ? <path strokeLinecap="round" strokeLinejoin="round" d="M3.98 8.223A10.477 10.477 0 001.934 12C3.226 16.338 7.244 19.5 12 19.5c.993 0 1.953-.138 2.863-.395M6.228 6.228A10.45 10.45 0 0112 4.5c4.756 0 8.773 3.162 10.065 7.498a10.523 10.523 0 01-4.293 5.774M6.228 6.228L3 3m3.228 3.228l3.65 3.65m7.894 7.894L21 21m-3.228-3.228l-3.65-3.65m0 0a3 3 0 10-4.243-4.243m4.242 4.242L9.88 9.88" />
+                        : <><path strokeLinecap="round" strokeLinejoin="round" d="M2.036 12.322a1.012 1.012 0 010-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178z" /><path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /></>
+                      }
+                    </svg>
+                    {hideAi ? 'AI grade hidden' : 'Hide AI grade'}
+                  </button>
+                )}
               </div>
-              <RubricMarkingGrid
+
+              {/* Redo AI grade panel */}
+              {redoOpen && (
+                <div className="mb-3 p-3 bg-amber-50 border border-amber-200 rounded-lg">
+                  <p className="text-xs font-medium text-amber-800 mb-1.5">What did the AI get wrong? <span className="font-normal text-amber-600">(optional — leave blank to simply retry)</span></p>
+                  <textarea
+                    value={redoAmendment}
+                    onChange={(e) => setRedoAmendment(e.target.value)}
+                    placeholder="e.g. The student clearly referenced the required theory but the AI missed it…"
+                    className="w-full text-sm border border-amber-200 rounded-lg p-2 mb-2 bg-white resize-none h-16 focus:outline-none focus:ring-1 focus:ring-amber-300"
+                  />
+                  <div className="flex gap-2">
+                    <button
+                      onClick={async () => {
+                        setRedoing(true)
+                        try {
+                          await onRedoGrade(current.id, redoAmendment)
+                          setRedoOpen(false)
+                          setRedoAmendment('')
+                        } finally {
+                          setRedoing(false)
+                        }
+                      }}
+                      disabled={redoing}
+                      className="px-3 py-1.5 text-xs font-medium bg-amber-600 text-white rounded-lg hover:bg-amber-700 disabled:opacity-50"
+                    >
+                      {redoing ? 'Regrading…' : 'Redo AI grade'}
+                    </button>
+                    <button
+                      onClick={() => { setRedoOpen(false); setRedoing(false) }}
+                      className="px-3 py-1.5 text-xs font-medium border border-gray-300 text-gray-600 rounded-lg hover:bg-gray-50"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+
+<RubricMarkingGrid
                 rubric={rubric}
                 selectedLevels={selectedLevels}
-                onSelectLevel={(criterionId, levelId) =>
+                onSelectLevel={(criterionId, levelId) => {
                   setSelectedLevels((prev) => ({ ...prev, [criterionId]: levelId }))
-                }
+                  setIsDirty(true)
+                }}
                 aiGradeMap={aiGradeMap}
                 criterionFeedback={criterionFeedback}
-                onCriterionFeedbackChange={(criterionId, value) =>
+                onCriterionFeedbackChange={(criterionId, value) => {
                   setCriterionFeedback((prev) => ({ ...prev, [criterionId]: value }))
-                }
+                  setIsDirty(true)
+                }}
                 hideAi={hideAi}
                 hideFeedback={hideFeedback}
               />
@@ -1383,8 +1817,8 @@ export function TeacherGradingPanel({ resourceQueue, moderationQueue, resourceRu
           <div className="flex items-center gap-3">
             <button
               onClick={handleSave}
-              disabled={saving}
-              className="px-4 py-2 text-sm bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50"
+              disabled={saving || (rubric?.criteria?.length > 0 && rubric.criteria.some((c) => !selectedLevels[c.id]))}
+              className="px-4 py-2 text-sm bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {saving ? 'Saving…' : isLast ? 'Save & Finish' : 'Save & Next'}
             </button>

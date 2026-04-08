@@ -9,12 +9,22 @@ from app.api.classes import _require_class_teacher
 from app.core.config import settings
 from app.core.database import SessionLocal, get_db
 from app.models.assignment import Assignment
+from app.models.class_ import Class
 from app.models.grade import GradeResult, GradingJob
 from app.models.ripple import RippleModeration, RippleResource
+from app.models.topic import TopicAttachment
 from app.models.user import User
-from app.schemas.grade import GradingJobOut, GradeResultOut, TeacherGradeIn
+from app.schemas.grade import GradingJobOut, GradeResultOut, RedoGradeIn, TeacherGradeIn
+from app.services.ai_service import ai_service
 from app.services.auth_service import get_current_user
-from app.services.grading_logic import grade_assignment, grade_preview_extension
+from app.services.grading_logic import (
+    grade_assignment,
+    grade_preview_extension,
+    is_submission_late,
+    parse_ripple_timestamp,
+    _filter_late_resources,
+    _filter_late_moderations,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -24,10 +34,47 @@ router = APIRouter(
 )
 
 
-def _build_grade_result_out(r: GradeResult, db: Session) -> GradeResultOut:
-    resource = db.get(RippleResource, r.ripple_resource_id)
+def _build_grade_result_out(
+    r: GradeResult, db: Session, assignment: Assignment | None = None,
+) -> GradeResultOut:
     moderation = db.get(RippleModeration, r.ripple_moderation_id) if r.ripple_moderation_id else None
+    resource = db.get(RippleResource, r.ripple_resource_id)
+    if moderation is not None:
+        matched_resource = (
+            db.query(RippleResource)
+            .filter(
+                RippleResource.assignment_id == r.assignment_id,
+                RippleResource.resource_id == moderation.resource_id,
+            )
+            .first()
+        )
+        if matched_resource is not None:
+            resource = matched_resource
     raw_teacher = _parse_criterion_grades(r.teacher_criterion_grades) if r.teacher_criterion_grades else None
+
+    # Compute late status from topic cutoff dates
+    cutoff_dates = (assignment.topic_cutoff_dates or {}) if assignment else {}
+    topic = (resource.topics if resource else "").strip()
+    timestamp_str = (moderation.created_at if moderation else None) or (resource.timestamp if resource else None)
+    # Extension belongs to the submission itself, not to the resource it references.
+    # Moderation results must only check the moderation's own flag; resource results
+    # must only check the resource's flag — OR-ing them would let a resource extension
+    # bleed into every moderation written against that resource (by different students).
+    if moderation is not None:
+        item_has_extension = moderation.has_extension
+    else:
+        item_has_extension = resource.has_extension if resource else False
+    late = bool(cutoff_dates) and is_submission_late(timestamp_str, topic, cutoff_dates, item_has_extension)
+
+    # Compute seconds late for UI display
+    seconds_late = None
+    if late:
+        cutoff_str = cutoff_dates.get(topic)
+        cutoff_dt = parse_ripple_timestamp(cutoff_str) if cutoff_str else None
+        submission_dt = parse_ripple_timestamp(timestamp_str)
+        if cutoff_dt and submission_dt:
+            seconds_late = max(int((submission_dt - cutoff_dt).total_seconds()), 0)
+
     return GradeResultOut(
         id=r.id,
         job_id=r.job_id,
@@ -47,11 +94,17 @@ def _build_grade_result_out(r: GradeResult, db: Session) -> GradeResultOut:
         overall_feedback=r.overall_feedback,
         error_message=r.error_message,
         graded_at=r.graded_at,
+        created_at=r.created_at or r.graded_at,
         resource_sections=resource.sections if resource else [],
+        submission_date=timestamp_str,
+        rubric_max_points_json=r.rubric_max_points_json,
         teacher_criterion_grades=raw_teacher,
         teacher_overall_feedback=r.teacher_overall_feedback,
         teacher_graded_at=r.teacher_graded_at,
         teacher_graded_by=r.teacher_graded_by,
+        is_late=late,
+        has_extension=item_has_extension,
+        seconds_late=seconds_late,
     )
 
 
@@ -168,20 +221,87 @@ def start_preview_grading(
     if existing is not None:
         if existing.status == "running":
             raise HTTPException(status_code=400, detail="A preview is already running — cancel it first")
-        # Clear only the results for the type being re-run; keep the other type's results.
+        # Delete only this preview job's results (scoped to result_type so the other
+        # type's results are untouched). This lets the next preview re-sample the same
+        # resources — which is intentional: re-running preview with new settings should
+        # show the same submissions so you can compare the effect of the change.
+        # Full-grade results are already job_id=NULL and are unaffected by this delete,
+        # so done_resource_ids still excludes fully-graded resources.
         # Delete + recreate the job row so any lingering background task (cancelled mid-AI-call)
         # will get None when it next fetches by job ID and will stop cleanly.
         db.query(GradeResult).filter(
             GradeResult.assignment_id == assignment_id,
             GradeResult.result_type == type,
+            GradeResult.job_id == existing.id,
         ).delete()
         db.delete(existing)
         db.commit()
     elif not came_from_full_job:
-        # No existing job at all — clear any stale results from previous runs
-        db.query(GradeResult).filter(GradeResult.assignment_id == assignment_id).delete()
+        # No existing job — clean up any stale preview results (non-null job_id) from
+        # a previous run whose job row was already gone. Preserve job_id=NULL results
+        # (orphaned full-grade results) so done_resource_ids stays accurate.
+        db.query(GradeResult).filter(
+            GradeResult.assignment_id == assignment_id,
+            GradeResult.job_id.isnot(None),
+        ).delete()
         db.commit()
     # If came_from_full_job: keep GradeResults so preview samples only ungraded resources
+
+    # ------------------------------------------------------------------
+    # Pre-compute the sample IDs in THIS session (which reliably sees all
+    # committed GradeResults). The background task will use these IDs
+    # directly instead of re-querying done_resource_ids in a new session.
+    # ------------------------------------------------------------------
+    sample_size = 3
+    topic_cutoff_dates = assignment.topic_cutoff_dates or {}
+
+    if type == "resource":
+        all_ids = [
+            row[0]
+            for row in db.query(RippleResource.id)
+            .filter(RippleResource.assignment_id == assignment_id)
+            .all()
+        ]
+        # Exclude late submissions (after topic cutoff, no extension)
+        all_ids = _filter_late_resources(all_ids, assignment_id, topic_cutoff_dates, db)
+        done_ids = {
+            row[0]
+            for row in db.query(GradeResult.ripple_resource_id)
+            .filter(
+                GradeResult.assignment_id == assignment_id,
+                GradeResult.result_type == "resource",
+                GradeResult.status.in_(("complete", "excluded")),
+            )
+            .all()
+        }
+    else:  # moderation
+        all_ids = [
+            row[0]
+            for row in db.query(RippleModeration.id)
+            .filter(RippleModeration.assignment_id == assignment_id)
+            .all()
+        ]
+        # Exclude late submissions
+        all_ids = _filter_late_moderations(all_ids, assignment_id, topic_cutoff_dates, db)
+        done_ids = {
+            row[0]
+            for row in db.query(GradeResult.ripple_moderation_id)
+            .filter(
+                GradeResult.assignment_id == assignment_id,
+                GradeResult.result_type == "moderation",
+                GradeResult.status.in_(("complete", "excluded")),
+                GradeResult.ripple_moderation_id.isnot(None),
+            )
+            .all()
+        }
+
+    ungraded_ids = [i for i in all_ids if i not in done_ids]
+    preview_item_ids = ungraded_ids[:sample_size]
+
+    logger.info(
+        "Preview setup: type=%s, all=%d, done=%d, ungraded=%d, sample=%s",
+        type, len(all_ids), len(done_ids), len(ungraded_ids), preview_item_ids,
+    )
 
     # Status starts as "running" — the worker only picks up "queued" jobs, so it
     # will never process this. The background task below handles it directly.
@@ -190,7 +310,8 @@ def start_preview_grading(
         status="running",
         is_preview=True,
         preview_type=type,
-        preview_sample_size=3,
+        preview_sample_size=sample_size,
+        preview_item_ids=preview_item_ids,
     )
     db.add(job)
     db.commit()
@@ -207,7 +328,10 @@ def clear_preview(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Delete all preview results and the preview job, returning to a clean state."""
+    """Delete preview results and the preview job, returning to a clean state.
+    Only removes results that belong to this preview job (job_id == job.id).
+    Orphaned full-grade results (job_id=null) are preserved so the next preview
+    can still detect already-graded resources via done_resource_ids."""
     _require_class_teacher(class_id, current_user, db)
     _get_assignment_or_404(class_id, assignment_id, db)
 
@@ -219,7 +343,10 @@ def clear_preview(
     if job.status == "running":
         raise HTTPException(status_code=400, detail="Cancel the running preview before clearing")
 
-    db.query(GradeResult).filter(GradeResult.assignment_id == assignment_id).delete()
+    db.query(GradeResult).filter(
+        GradeResult.assignment_id == assignment_id,
+        GradeResult.job_id == job.id,
+    ).delete()
     db.delete(job)
     db.commit()
     return Response(status_code=204)
@@ -438,6 +565,7 @@ def get_grade_report(
         for r in results:
             if r.result_type != result_type:
                 continue
+            stored_max = r.rubric_max_points_json or {}
             for cg in _parse_criterion_grades(r.criterion_grades):
                 cid = cg.get("criterion_id", "")
                 if not cid:
@@ -447,23 +575,29 @@ def get_grade_report(
                         "criterion_id": cid,
                         "criterion_name": cg.get("criterion_name", cid),
                         "points": [],
+                        "pct_samples": [],
                         "level_counts": {},
                     }
-                crit_data[cid]["points"].append(cg.get("points_awarded", 0))
+                pts = cg.get("points_awarded", 0)
+                crit_data[cid]["points"].append(pts)
+                # Use per-result stored max for correct percentage, fall back to current rubric
+                crit_max = stored_max.get(cid) if cid in stored_max else max_map.get(cid, 0)
+                crit_data[cid]["pct_samples"].append((pts / crit_max * 100) if crit_max > 0 else 0)
                 lvl = cg.get("level_title", "Unknown")
                 crit_data[cid]["level_counts"][lvl] = crit_data[cid]["level_counts"].get(lvl, 0) + 1
         out = []
         for cid, data in crit_data.items():
             pts = data["points"]
+            pct_samples = data["pct_samples"]
             avg = sum(pts) / len(pts) if pts else 0
+            avg_pct = sum(pct_samples) / len(pct_samples) if pct_samples else 0
             max_pts = max_map.get(cid, 0)
-            pct = (avg / max_pts * 100) if max_pts > 0 else 0
             out.append({
                 "criterion_id": cid,
                 "criterion_name": data["criterion_name"],
                 "avg_points": round(avg, 2),
                 "max_points": max_pts,
-                "avg_pct": round(pct, 1),
+                "avg_pct": round(avg_pct, 1),
                 "level_distribution": data["level_counts"],
             })
         out.sort(key=lambda x: x["avg_pct"])
@@ -482,8 +616,13 @@ def get_grade_report(
             continue
         topics_str = resource.topics or ""
         topics = [t.strip() for t in topics_str.split(",") if t.strip()] or ["(no topic)"]
-        ai_total = sum(cg.get("points_awarded", 0) for cg in (_parse_criterion_grades(r.criterion_grades)))
-        max_total = sum(max_by_cid.get(cg.get("criterion_id", ""), 0) for cg in (_parse_criterion_grades(r.criterion_grades)))
+        cgs = _parse_criterion_grades(r.criterion_grades)
+        ai_total = sum(cg.get("points_awarded", 0) for cg in cgs)
+        stored_max = r.rubric_max_points_json or {}
+        max_total = (
+            sum(stored_max.values()) if stored_max
+            else sum(max_by_cid.get(cg.get("criterion_id", ""), 0) for cg in cgs)
+        )
         for topic in topics:
             if topic not in topic_data:
                 topic_data[topic] = {"scores": [], "max_scores": []}
@@ -520,7 +659,107 @@ def get_grade_results(
     db: Session = Depends(get_db),
 ):
     _require_class_teacher(class_id, current_user, db)
-    _get_assignment_or_404(class_id, assignment_id, db)
+    assignment = _get_assignment_or_404(class_id, assignment_id, db)
+
+    # Ensure every imported resource has a GradeResult row (pending if not yet graded).
+    # This lets teachers view and manually mark submissions before AI grading runs.
+    all_resource_ids = [
+        row[0]
+        for row in db.query(RippleResource.id)
+        .filter(RippleResource.assignment_id == assignment_id)
+        .all()
+    ]
+    graded_resource_ids = {
+        row[0]
+        for row in db.query(GradeResult.ripple_resource_id)
+        .filter(GradeResult.assignment_id == assignment_id, GradeResult.result_type == "resource")
+        .all()
+    }
+    new_rows = False
+    for rid in all_resource_ids:
+        if rid not in graded_resource_ids:
+            db.add(GradeResult(
+                assignment_id=assignment_id,
+                ripple_resource_id=rid,
+                result_type="resource",
+                status="pending",
+                criterion_grades=[],
+            ))
+            new_rows = True
+
+    all_mod_ids = [
+        row[0]
+        for row in db.query(RippleModeration.id)
+        .filter(RippleModeration.assignment_id == assignment_id)
+        .all()
+    ]
+    graded_mod_ids = {
+        row[0]
+        for row in db.query(GradeResult.ripple_moderation_id)
+        .filter(
+            GradeResult.assignment_id == assignment_id,
+            GradeResult.result_type == "moderation",
+            GradeResult.ripple_moderation_id.isnot(None),
+        )
+        .all()
+    }
+    for mid in all_mod_ids:
+        if mid not in graded_mod_ids:
+            mod = db.get(RippleModeration, mid)
+            if mod is None:
+                continue
+            resource = (
+                db.query(RippleResource)
+                .filter(
+                    RippleResource.assignment_id == assignment_id,
+                    RippleResource.resource_id == mod.resource_id,
+                )
+                .first()
+            )
+            if resource is None:
+                resource = db.query(RippleResource).filter(
+                    RippleResource.assignment_id == assignment_id
+                ).first()
+            if resource is None:
+                continue
+            db.add(GradeResult(
+                assignment_id=assignment_id,
+                ripple_resource_id=resource.id,
+                ripple_moderation_id=mid,
+                result_type="moderation",
+                status="pending",
+                criterion_grades=[],
+            ))
+            new_rows = True
+
+    repaired_rows = False
+    moderation_rows = (
+        db.query(GradeResult)
+        .filter(
+            GradeResult.assignment_id == assignment_id,
+            GradeResult.result_type == "moderation",
+            GradeResult.ripple_moderation_id.isnot(None),
+        )
+        .all()
+    )
+    for row in moderation_rows:
+        mod = db.get(RippleModeration, row.ripple_moderation_id)
+        if mod is None:
+            continue
+        resource = (
+            db.query(RippleResource)
+            .filter(
+                RippleResource.assignment_id == assignment_id,
+                RippleResource.resource_id == mod.resource_id,
+            )
+            .first()
+        )
+        if resource is not None and row.ripple_resource_id != resource.id:
+            row.ripple_resource_id = resource.id
+            repaired_rows = True
+
+    if new_rows or repaired_rows:
+        db.commit()
 
     rows = (
         db.query(GradeResult)
@@ -528,7 +767,8 @@ def get_grade_results(
         .order_by(GradeResult.graded_at)
         .all()
     )
-    return [_build_grade_result_out(r, db) for r in rows]
+
+    return [_build_grade_result_out(r, db, assignment) for r in rows]
 
 
 @router.put("/results/{result_id}/teacher", response_model=GradeResultOut)
@@ -541,7 +781,7 @@ def save_teacher_grade(
     db: Session = Depends(get_db),
 ):
     _require_class_teacher(class_id, current_user, db)
-    _get_assignment_or_404(class_id, assignment_id, db)
+    assignment = _get_assignment_or_404(class_id, assignment_id, db)
 
     result = db.get(GradeResult, result_id)
     if result is None or result.assignment_id != assignment_id:
@@ -552,7 +792,105 @@ def save_teacher_grade(
     result.teacher_graded_by = current_user.user_id
     db.commit()
     db.refresh(result)
-    return _build_grade_result_out(result, db)
+    return _build_grade_result_out(result, db, assignment)
+
+
+@router.post("/results/{result_id}/redo", response_model=GradeResultOut)
+def redo_ai_grade(
+    class_id: int,
+    assignment_id: int,
+    result_id: int,
+    body: RedoGradeIn,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Re-run AI grading for a single result with an optional amendment note."""
+    _require_class_teacher(class_id, current_user, db)
+    assignment = _get_assignment_or_404(class_id, assignment_id, db)
+
+    result = db.get(GradeResult, result_id)
+    if result is None or result.assignment_id != assignment_id:
+        raise HTTPException(status_code=404, detail="Grade result not found")
+
+    if not assignment.rubric_json:
+        raise HTTPException(status_code=400, detail="No rubric defined for this assignment")
+
+    envelope = json.loads(assignment.rubric_json)
+    if result.result_type == "moderation":
+        rubric_dict = envelope.get("moderation") or envelope.get("resource", envelope)
+    else:
+        rubric_dict = envelope.get("resource", envelope)
+
+    resource = db.get(RippleResource, result.ripple_resource_id)
+    if resource is None:
+        raise HTTPException(status_code=404, detail="Resource not found")
+
+    cls = db.get(Class, assignment.class_id)
+    context = {
+        "class_description": cls.description if cls else "",
+        "assignment_description": assignment.description,
+        "marking_criteria": assignment.marking_criteria,
+        "additional_notes": assignment.additional_notes,
+    }
+    if body.amendment:
+        context["amendment"] = body.amendment
+
+    topic_attachments = None
+    if assignment.use_topic_attachments:
+        resource_topic = (resource.topics or "").strip()
+        if resource_topic:
+            rows = (
+                db.query(TopicAttachment)
+                .filter(
+                    TopicAttachment.assignment_id == assignment_id,
+                    TopicAttachment.topic == resource_topic,
+                )
+                .all()
+            )
+            topic_attachments = [
+                {"filename": a.filename, "content_text": a.content_text}
+                for a in rows
+                if a.content_text.strip()
+            ]
+
+    try:
+        if result.result_type == "moderation":
+            moderation = db.get(RippleModeration, result.ripple_moderation_id) if result.ripple_moderation_id else None
+            if moderation is None:
+                raise HTTPException(status_code=404, detail="Moderation not found")
+            ai_result = ai_service.grade_moderation(
+                moderation_comment=moderation.comment or "",
+                original_sections=list(resource.sections or []),
+                rubric=rubric_dict,
+                context={**context, "additional_notes": assignment.moderation_additional_notes or context["additional_notes"]},
+                model=assignment.ai_model or None,
+                feedback_format=assignment.feedback_format or "",
+            )
+        else:
+            ai_result = ai_service.grade_submission(
+                sections=list(resource.sections or []),
+                rubric=rubric_dict,
+                context=context,
+                model=assignment.ai_model or None,
+                feedback_format=assignment.feedback_format or "",
+                topic_attachments=topic_attachments,
+                topic_attachment_instructions=assignment.topic_attachment_instructions or "",
+            )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"AI grading failed: {exc}")
+
+    result.criterion_grades = ai_result["criterion_grades"]
+    result.overall_feedback = ai_result.get("overall_feedback", "")
+    result.error_message = None
+    result.status = "complete"
+    result.graded_at = datetime.now(timezone.utc)
+    result.rubric_max_points_json = {
+        c["id"]: max((l["points"] for l in c.get("levels", [])), default=0)
+        for c in rubric_dict.get("criteria", [])
+    }
+    db.commit()
+    db.refresh(result)
+    return _build_grade_result_out(result, db, assignment)
 
 
 # ---------------------------------------------------------------------------
@@ -623,7 +961,41 @@ def get_student_grade_email(
     if topic:
         student_items = [(r, res, mod) for r, res, mod in student_items if (res.topics or "").strip() == topic]
 
-    if not student_items:
+    # Collect dismissed late submissions for this student so the email can note them
+    cutoff_dates = assignment.topic_cutoff_dates or {}
+    all_excluded = (
+        db.query(GradeResult)
+        .filter(GradeResult.assignment_id == assignment_id, GradeResult.status == "excluded")
+        .all()
+    )
+    dismissed_late_items: list[dict] = []
+    for r in all_excluded:
+        res = db.get(RippleResource, r.ripple_resource_id)
+        if not res:
+            continue
+        mod = db.get(RippleModeration, r.ripple_moderation_id) if r.ripple_moderation_id else None
+        if r.result_type == "resource" and res.primary_author_id != student_id:
+            continue
+        if r.result_type == "moderation" and (not mod or mod.user_id != student_id):
+            continue
+        item_topic = (res.topics or "").strip()
+        if topic and item_topic != topic:
+            continue
+        timestamp_str = (mod.created_at if mod else None) or (res.timestamp if res else None)
+        cutoff_str = cutoff_dates.get(item_topic)
+        cutoff_dt = parse_ripple_timestamp(cutoff_str) if cutoff_str else None
+        submission_dt = parse_ripple_timestamp(timestamp_str) if timestamp_str else None
+        seconds_late = None
+        if cutoff_dt and submission_dt:
+            seconds_late = max(int((submission_dt - cutoff_dt).total_seconds()), 0)
+        dismissed_late_items.append({
+            "result_type": r.result_type,
+            "resource_id": res.resource_id,
+            "topic": item_topic or "No Topic",
+            "seconds_late": seconds_late,
+        })
+
+    if not student_items and not dismissed_late_items:
         raise HTTPException(status_code=404, detail="No completed results found for this student")
 
     # Resolve email address
@@ -703,6 +1075,7 @@ def get_student_grade_email(
         combine_resource_max_n=assignment.combine_resource_max_n,
         combine_moderation_grades=bool(assignment.combine_moderation_grades),
         combine_moderation_max_n=assignment.combine_moderation_max_n,
+        dismissed_late_items=dismissed_late_items,
     )
 
     subject = f"AI Grade Summary: {assignment.title}"
@@ -789,5 +1162,3 @@ def get_grade_email(
         "subject": f"AI Grade: {assignment.title}",
         "body": body,
     }
-
-

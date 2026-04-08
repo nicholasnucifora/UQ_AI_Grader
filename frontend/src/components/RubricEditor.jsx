@@ -91,7 +91,7 @@ const DASHED = '1px dashed #d1d5db'
 // RubricGroup — one CSS grid per set of criteria sharing the same level columns
 // ---------------------------------------------------------------------------
 
-function RubricGroup({ group, onUpdate, onDelete, readOnly, onAddRow, onAddColumn, onAddBoth, onDeleteColumn, onUpdateLevelHeader }) {
+function RubricGroup({ group, onUpdate, onDelete, readOnly, hasGrades, onAddRow, onAddColumn, onAddBoth, onDeleteColumn, onUpdateLevelHeader }) {
   const { headerLevels, criteria } = group
   const [hoveredId, setHoveredId] = useState(null)
   const [hoveredLevelTitle, setHoveredLevelTitle] = useState(null)
@@ -158,7 +158,7 @@ function RubricGroup({ group, onUpdate, onDelete, readOnly, onAddRow, onAddColum
             />
             <span>pts</span>
           </div>
-          {!readOnly && (
+          {!readOnly && !hasGrades && (
             <button
               type="button"
               onClick={() => onDeleteColumn(colIdx)}
@@ -223,7 +223,7 @@ function RubricGroup({ group, onUpdate, onDelete, readOnly, onAddRow, onAddColum
                   {hintVisible ? 'AI hint ✕' : '+ AI hint'}
                 </button>
               )}
-              {!readOnly && (
+              {!readOnly && !hasGrades && (
                 <button
                   type="button"
                   onClick={() => onDelete(criterion.id)}
@@ -291,6 +291,17 @@ function RubricGroup({ group, onUpdate, onDelete, readOnly, onAddRow, onAddColum
   //  ├╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌┤
   //  │              +              ┆  ++   │  ← row + and ++ corner
   //  └─────────────────────────────┴───────┘
+  if (hasGrades) {
+    return (
+      <div className="border border-gray-200 rounded-lg overflow-hidden">
+        {tableGrid}
+        <div className="px-3 py-1.5 bg-gray-50 border-t border-gray-200 text-xs text-gray-400">
+          Structure locked — can't add or remove criteria/levels once submissions have been graded
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="border border-gray-200 rounded-lg overflow-hidden">
       {/* Top section: table + column + button side-by-side */}
@@ -338,7 +349,7 @@ function RubricGroup({ group, onUpdate, onDelete, readOnly, onAddRow, onAddColum
 // RubricEditor
 // ---------------------------------------------------------------------------
 
-export default function RubricEditor({ rubric, onChange, readOnly = false, onDelete }) {
+export default function RubricEditor({ rubric, onChange, readOnly = false, hasGrades = false, onDelete }) {
   const { warnings } = useMemo(
     () => (rubric ? validateRubric(rubric) : { errors: [], warnings: [] }),
     [rubric]
@@ -494,6 +505,7 @@ export default function RubricEditor({ rubric, onChange, readOnly = false, onDel
             onUpdate={updateCriterion}
             onDelete={deleteCriterion}
             readOnly={readOnly}
+            hasGrades={hasGrades}
             onAddRow={() => addCriterionToGroup(group)}
             onAddColumn={() => addColumnToGroup(group)}
             onAddBoth={() => addBothToGroup(group)}

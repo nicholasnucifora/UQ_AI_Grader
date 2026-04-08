@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from app.api.classes import _require_class_teacher
 from app.core.database import get_db
 from app.models.assignment import Assignment
+from app.models.grade import GradeResult
 from app.models.ripple import RippleModeration, RippleResource
 from app.models.topic import TopicAttachment
 from app.models.user import User
@@ -34,7 +35,7 @@ def list_topics(
 ):
     """Return unique topics and resource counts for this assignment."""
     _require_class_teacher(class_id, current_user, db)
-    _get_assignment_or_404(class_id, assignment_id, db)
+    assignment = _get_assignment_or_404(class_id, assignment_id, db)
 
     resources = (
         db.query(RippleResource)
@@ -71,6 +72,7 @@ def list_topics(
     for (topic,) in attachment_rows:
         topic_attachment_counts[topic] = topic_attachment_counts.get(topic, 0) + 1
 
+    cutoff_dates = assignment.topic_cutoff_dates or {}
     all_topics = set(topic_resource_counts) | set(topic_moderation_counts)
     return sorted(
         [
@@ -79,6 +81,7 @@ def list_topics(
                 "resource_count": topic_resource_counts.get(t, 0),
                 "moderation_count": topic_moderation_counts.get(t, 0),
                 "attachment_count": topic_attachment_counts.get(t, 0),
+                "cutoff_date": cutoff_dates.get(t),
             }
             for t in all_topics
         ],
@@ -165,3 +168,130 @@ def delete_attachment(
     db.delete(attachment)
     db.commit()
     return Response(status_code=204)
+
+
+@router.put("/topics/{topic}/cutoff")
+def set_topic_cutoff(
+    class_id: int,
+    assignment_id: int,
+    topic: str,
+    body: dict,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Set or clear the cutoff date for a topic. Body: {"cutoff_date": "DD-MM-YYYY HH:MM"} or {"cutoff_date": null}."""
+    _require_class_teacher(class_id, current_user, db)
+    assignment = _get_assignment_or_404(class_id, assignment_id, db)
+
+    cutoff_dates = dict(assignment.topic_cutoff_dates or {})
+    cutoff_value = body.get("cutoff_date")
+    if cutoff_value:
+        cutoff_dates[topic] = cutoff_value
+    else:
+        cutoff_dates.pop(topic, None)
+
+    assignment.topic_cutoff_dates = cutoff_dates
+    db.commit()
+    return {"topic": topic, "cutoff_date": cutoff_dates.get(topic)}
+
+
+@router.post("/extensions/{item_type}/{item_id}")
+def grant_extension(
+    class_id: int,
+    assignment_id: int,
+    item_type: str,
+    item_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Grant an extension to a specific resource or moderation (exempts it from the topic cutoff)."""
+    if item_type not in ("resource", "moderation"):
+        raise HTTPException(status_code=400, detail="item_type must be 'resource' or 'moderation'")
+
+    _require_class_teacher(class_id, current_user, db)
+    _get_assignment_or_404(class_id, assignment_id, db)
+
+    if item_type == "resource":
+        item = db.get(RippleResource, item_id)
+        if item is None or item.assignment_id != assignment_id:
+            raise HTTPException(status_code=404, detail="Resource not found")
+    else:
+        item = db.get(RippleModeration, item_id)
+        if item is None or item.assignment_id != assignment_id:
+            raise HTTPException(status_code=404, detail="Moderation not found")
+
+    item.has_extension = True
+    db.commit()
+    return {"item_type": item_type, "item_id": item_id, "has_extension": True}
+
+
+@router.post("/revoke-extension/{item_type}/{item_id}")
+def revoke_extension(
+    class_id: int,
+    assignment_id: int,
+    item_type: str,
+    item_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Revoke a previously granted extension."""
+    if item_type not in ("resource", "moderation"):
+        raise HTTPException(status_code=400, detail="item_type must be 'resource' or 'moderation'")
+
+    _require_class_teacher(class_id, current_user, db)
+    _get_assignment_or_404(class_id, assignment_id, db)
+
+    if item_type == "resource":
+        item = db.get(RippleResource, item_id)
+        if item is None or item.assignment_id != assignment_id:
+            raise HTTPException(status_code=404, detail="Resource not found")
+    else:
+        item = db.get(RippleModeration, item_id)
+        if item is None or item.assignment_id != assignment_id:
+            raise HTTPException(status_code=404, detail="Moderation not found")
+
+    item.has_extension = False
+    db.commit()
+    return {"item_type": item_type, "item_id": item_id, "has_extension": False}
+
+
+@router.post("/acknowledge-late/{result_id}")
+def acknowledge_late_submission(
+    class_id: int,
+    assignment_id: int,
+    result_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Mark a late submission as acknowledged — teacher confirms no extension will be given."""
+    _require_class_teacher(class_id, current_user, db)
+    _get_assignment_or_404(class_id, assignment_id, db)
+
+    result = db.get(GradeResult, result_id)
+    if result is None or result.assignment_id != assignment_id:
+        raise HTTPException(status_code=404, detail="Grade result not found")
+
+    result.status = "excluded"
+    db.commit()
+    return {"id": result_id, "status": "excluded"}
+
+
+@router.post("/undo-acknowledge-late/{result_id}")
+def undo_acknowledge_late(
+    class_id: int,
+    assignment_id: int,
+    result_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Revert a dismissed late submission back to pending."""
+    _require_class_teacher(class_id, current_user, db)
+    _get_assignment_or_404(class_id, assignment_id, db)
+
+    result = db.get(GradeResult, result_id)
+    if result is None or result.assignment_id != assignment_id:
+        raise HTTPException(status_code=404, detail="Grade result not found")
+
+    result.status = "pending"
+    db.commit()
+    return {"id": result_id, "status": "pending"}

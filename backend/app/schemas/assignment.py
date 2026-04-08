@@ -32,6 +32,7 @@ class AssignmentCreate(BaseModel):
     combine_moderation_max_n: int | None = None
     combine_scope: str = "topic"
     topic_instruction_overrides: dict = {}
+    topic_cutoff_dates: dict = {}
 
 
 class AssignmentUpdate(BaseModel):
@@ -66,6 +67,7 @@ class AssignmentUpdate(BaseModel):
     combine_moderation_max_n: int | None = None
     combine_scope: str | None = None
     topic_instruction_overrides: dict | None = None
+    topic_cutoff_dates: dict | None = None
 
 
 class AssignmentOut(BaseModel):
@@ -102,10 +104,12 @@ class AssignmentOut(BaseModel):
     combine_moderation_max_n: int | None = None
     combine_scope: str = "topic"
     topic_instruction_overrides: dict = {}
+    topic_cutoff_dates: dict = {}
     created_by: str
     created_at: datetime
+    has_grades: bool = False
 
-    @field_validator("topic_instruction_overrides", mode="before")
+    @field_validator("topic_instruction_overrides", "topic_cutoff_dates", mode="before")
     @classmethod
     def coerce_none_to_empty_dict(cls, v):
         return v if v is not None else {}

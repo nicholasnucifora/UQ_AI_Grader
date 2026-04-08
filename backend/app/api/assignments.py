@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.models.assignment import Assignment
+from app.models.grade import GradeResult
 from app.models.user import User
 from app.schemas.assignment import AssignmentCreate, AssignmentOut, AssignmentUpdate
 from app.services.auth_service import get_current_user
@@ -20,7 +21,20 @@ def list_assignments(
     db: Session = Depends(get_db),
 ):
     _get_member(class_id, current_user, db)
-    return db.query(Assignment).filter(Assignment.class_id == class_id).all()
+    assignments = db.query(Assignment).filter(Assignment.class_id == class_id).all()
+    graded_ids = {
+        row[0]
+        for row in db.query(GradeResult.assignment_id)
+        .filter(GradeResult.assignment_id.in_([a.id for a in assignments]))
+        .distinct()
+        .all()
+    } if assignments else set()
+    result = []
+    for a in assignments:
+        out = AssignmentOut.model_validate(a)
+        out.has_grades = a.id in graded_ids
+        result.append(out)
+    return result
 
 
 @router.post("", response_model=AssignmentOut, status_code=201)
@@ -63,7 +77,10 @@ def get_assignment(
     assignment = db.get(Assignment, assignment_id)
     if assignment is None or assignment.class_id != class_id:
         raise HTTPException(status_code=404, detail="Assignment not found")
-    return assignment
+    has_grades = db.query(GradeResult.id).filter(GradeResult.assignment_id == assignment_id).first() is not None
+    out = AssignmentOut.model_validate(assignment)
+    out.has_grades = has_grades
+    return out
 
 
 @router.put("/{assignment_id}", response_model=AssignmentOut)

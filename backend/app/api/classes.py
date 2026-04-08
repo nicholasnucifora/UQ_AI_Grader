@@ -4,7 +4,9 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.models.class_ import Class
 from app.models.class_member import ClassMember
+from app.models.grade import GradeResult
 from app.models.user import User
+from app.schemas.assignment import AssignmentOut
 from app.schemas.class_ import AddMemberRequest, ClassCreate, ClassDetailOut, ClassOut, ClassUpdate, MemberOut
 from app.services.auth_service import get_current_user, require_staff
 
@@ -106,6 +108,19 @@ def get_class(
             )
         )
 
+    graded_ids = {
+        row[0]
+        for row in db.query(GradeResult.assignment_id)
+        .filter(GradeResult.assignment_id.in_([a.id for a in cls.assignments]))
+        .distinct()
+        .all()
+    } if cls.assignments else set()
+    assignments_out = []
+    for a in cls.assignments:
+        out = AssignmentOut.model_validate(a)
+        out.has_grades = a.id in graded_ids
+        assignments_out.append(out)
+
     return ClassDetailOut(
         id=cls.id,
         name=cls.name,
@@ -113,7 +128,7 @@ def get_class(
         created_by=cls.created_by,
         created_at=cls.created_at,
         members=members_out,
-        assignments=cls.assignments,
+        assignments=assignments_out,
     )
 
 

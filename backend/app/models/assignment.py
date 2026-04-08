@@ -38,6 +38,8 @@ class Assignment(Base):
     moderation_topic_attachment_instructions: Mapped[str] = mapped_column(Text, nullable=False, default="")
     # Per-topic instruction overrides: {topic_name: instruction_string} — overrides global topic_attachment_instructions
     topic_instruction_overrides: Mapped[dict] = mapped_column(JSON, nullable=True, default=dict)
+    # Per-topic cutoff dates: {topic_name: "DD-MM-YYYY HH:MM"} — submissions after this date are excluded from grading
+    topic_cutoff_dates: Mapped[dict] = mapped_column(JSON, nullable=True, default=dict)
     # Rubric stored as JSON envelope {"resource": {...}, "moderation": {...}} (migration 3f2f0ece9f62)
     rubric_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Grade scaling — convert raw rubric score to a custom grade range (migration c1d2e3f4a5b6)

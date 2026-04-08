@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, ForeignKey, JSON, String, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, JSON, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -23,8 +23,10 @@ class RippleResource(Base):
     primary_author_name: Mapped[str] = mapped_column(String(256), nullable=False, default="")
     resource_type: Mapped[str] = mapped_column(String(128), nullable=False, default="")
     resource_status: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    timestamp: Mapped[str | None] = mapped_column(String(64), nullable=True, default=None)
     topics: Mapped[str] = mapped_column(Text, nullable=False, default="")
     sections: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    has_extension: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     assignment: Mapped["Assignment"] = relationship("Assignment")  # noqa: F821
 
@@ -46,6 +48,8 @@ class RippleModeration(Base):
     user_name: Mapped[str] = mapped_column(String(256), nullable=False, default="")
     role: Mapped[str] = mapped_column(String(128), nullable=False, default="")
     comment: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    created_at: Mapped[str | None] = mapped_column(String(64), nullable=True, default=None)
     rubric_scores: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    has_extension: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     assignment: Mapped["Assignment"] = relationship("Assignment")  # noqa: F821

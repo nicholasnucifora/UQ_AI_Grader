@@ -24,6 +24,7 @@ export default function AssignmentEditPage() {
   const [deleting, setDeleting] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [error, setError] = useState('')
+  const [gradeJob, setGradeJob] = useState(null)
 
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
@@ -31,6 +32,7 @@ export default function AssignmentEditPage() {
   const [rubric, setRubric] = useState(null)
   const [moderationRubric, setModerationRubric] = useState(null)
   const [rubricExists, setRubricExists] = useState(false)
+  const [hasGrades, setHasGrades] = useState(false)
   const [sameRubric, setSameRubric] = useState(true)
   const [additionalNotes, setAdditionalNotes] = useState('')
   const [moderationNotes, setModerationNotes] = useState('')
@@ -41,6 +43,7 @@ export default function AssignmentEditPage() {
   const [useTopicAttachments, setUseTopicAttachments] = useState(false)
   const [topicAttachmentInstructions, setTopicAttachmentInstructions] = useState('')
   const [topicInstructionOverrides, setTopicInstructionOverrides] = useState({})
+  const [topicCutoffDates, setTopicCutoffDates] = useState({})
   // Grade output
   const [customizeGradeOutput, setCustomizeGradeOutput] = useState(false)
   const [sameGradeOutput, setSameGradeOutput] = useState(true)
@@ -60,15 +63,18 @@ export default function AssignmentEditPage() {
   useEffect(() => {
     async function load() {
       try {
-        const [classData, rubricData] = await Promise.all([
+        const [classData, rubricData, gradeJobData] = await Promise.all([
           api.getClass(classId),
           api.getRubric(classId, aid).catch(() => null),
+          api.getGradeStatus(classId, aid).catch(() => null),
         ])
         setCls(classData)
+        setGradeJob(gradeJobData)
 
         const assignment = classData.assignments.find((a) => a.id === parseInt(aid, 10))
         if (!assignment) return
 
+        setHasGrades(assignment.has_grades ?? false)
         setTitle(assignment.title)
         setDescription(assignment.description ?? '')
         setAssignmentType(assignment.assignment_type ?? 'resources')
@@ -82,6 +88,7 @@ export default function AssignmentEditPage() {
         setUseTopicAttachments(assignment.use_topic_attachments ?? false)
         setTopicAttachmentInstructions(assignment.topic_attachment_instructions ?? '')
         setTopicInstructionOverrides(assignment.topic_instruction_overrides ?? {})
+        setTopicCutoffDates(assignment.topic_cutoff_dates ?? {})
         // Grade output
         const hasGradeConfig = assignment.grade_scale_enabled ||
           assignment.combine_resource_grades || assignment.combine_moderation_grades
@@ -113,8 +120,10 @@ export default function AssignmentEditPage() {
   const isRnM = assignmentType === 'resources_and_moderations'
   const rubricLinked = !isRnM || sameRubric
   const notesLinked = !isRnM || sameNotes
+  const isFullGradingActive = !!(gradeJob && !gradeJob.is_preview && (gradeJob.status === 'queued' || gradeJob.status === 'running'))
 
   async function handleDelete() {
+    if (isFullGradingActive) return
     setDeleting(true)
     try {
       await api.deleteAssignment(classId, aid)
@@ -128,6 +137,10 @@ export default function AssignmentEditPage() {
 
   async function handleSubmit(e) {
     e.preventDefault()
+    if (isFullGradingActive) {
+      setError('AI grading is currently running. Wait for it to finish or cancel it before editing this assignment.')
+      return
+    }
     if (!title.trim()) return setError('Title is required.')
     setSaving(true)
     setError('')
@@ -149,6 +162,7 @@ export default function AssignmentEditPage() {
         use_topic_attachments: useTopicAttachments,
         topic_attachment_instructions: topicAttachmentInstructions.trim(),
         topic_instruction_overrides: topicInstructionOverrides,
+        topic_cutoff_dates: topicCutoffDates,
         grade_scale_enabled: scaledMax !== null,
         grade_scale_max: scaledMax,
         grade_rounding: gradeRounding,
@@ -201,6 +215,11 @@ export default function AssignmentEditPage() {
         <h1 className="text-2xl font-bold text-gray-900">Edit Assignment</h1>
 
         {error && <p className="text-sm text-red-600">{error}</p>}
+        {isFullGradingActive && (
+          <p className="text-sm text-amber-700">
+            AI grading is running for this assignment. Saving and deleting are temporarily disabled.
+          </p>
+        )}
 
         <form onSubmit={handleSubmit} className="space-y-5">
 
@@ -261,15 +280,15 @@ export default function AssignmentEditPage() {
                 <div className="space-y-4">
                   <div>
                     <p className="text-xs font-medium text-gray-500 mb-2">Resources</p>
-                    <RubricBlock rubric={rubric} setRubric={setRubric} />
+                    <RubricBlock rubric={rubric} setRubric={setRubric} hasGrades={hasGrades} />
                   </div>
                   <div>
                     <p className="text-xs font-medium text-gray-500 mb-2">Moderations</p>
-                    <RubricBlock rubric={moderationRubric} setRubric={setModerationRubric} />
+                    <RubricBlock rubric={moderationRubric} setRubric={setModerationRubric} hasGrades={hasGrades} />
                   </div>
                 </div>
               ) : (
-                <RubricBlock rubric={rubric} setRubric={setRubric} />
+                <RubricBlock rubric={rubric} setRubric={setRubric} hasGrades={hasGrades} />
               )}
             </div>
 
@@ -332,8 +351,11 @@ export default function AssignmentEditPage() {
               )}
             </div>
 
-            {/* ── Topic Attachments ── */}
+            {/* ── Topics ── */}
             <div className="border border-gray-200 rounded-lg p-4 space-y-3">
+              <h3 className="text-sm font-semibold text-gray-800">Topics</h3>
+              <p className="text-xs text-gray-500">Set cutoff dates per topic to exclude late submissions from AI grading. Optionally attach reference files for the AI to use when grading.</p>
+
               <label className="flex items-start gap-3 cursor-pointer select-none">
                 <input
                   type="checkbox"
@@ -342,40 +364,39 @@ export default function AssignmentEditPage() {
                   onChange={(e) => setUseTopicAttachments(e.target.checked)}
                 />
                 <div>
-                  <span className="text-sm font-medium text-gray-800">Use topic-specific attachments</span>
+                  <span className="text-sm font-medium text-gray-800">Include topic-specific attachments for AI</span>
                   <p className="text-xs text-gray-500 mt-0.5">
-                    When enabled, files uploaded to each topic page will be included as reference material
-                    when the AI grades submissions for that topic. When disabled, the upload button on topic
-                    pages is hidden.
+                    When enabled, files uploaded to each topic will be included as reference material when the AI grades submissions for that topic.
                   </p>
                 </div>
               </label>
 
               {useTopicAttachments && (
-                <>
-                  <div>
-                    <label className="block text-xs font-medium text-gray-700 mb-1">
-                      Attachment instructions
-                      <span className="ml-1 font-normal text-gray-400">— global rule for how the AI should use these files across all topics</span>
-                    </label>
-                    <textarea
-                      className={inputCls}
-                      rows={3}
-                      placeholder="e.g. The attached files are lecture slides for this topic. Use them to assess whether the student's submission demonstrates knowledge of the key concepts covered in class."
-                      value={topicAttachmentInstructions}
-                      onChange={(e) => setTopicAttachmentInstructions(e.target.value)}
-                    />
-                  </div>
-
-                  <TopicAttachmentManager
-                    classId={classId}
-                    assignmentId={aid}
-                    globalInstruction={topicAttachmentInstructions}
-                    overrides={topicInstructionOverrides}
-                    onOverrideChange={setTopicInstructionOverrides}
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">
+                    Attachment instructions
+                    <span className="ml-1 font-normal text-gray-400">— global rule for how the AI should use these files across all topics</span>
+                  </label>
+                  <textarea
+                    className={inputCls}
+                    rows={3}
+                    placeholder="e.g. The attached files are lecture slides for this topic. Use them to assess whether the student's submission demonstrates knowledge of the key concepts covered in class."
+                    value={topicAttachmentInstructions}
+                    onChange={(e) => setTopicAttachmentInstructions(e.target.value)}
                   />
-                </>
+                </div>
               )}
+
+              <TopicAttachmentManager
+                classId={classId}
+                assignmentId={aid}
+                globalInstruction={topicAttachmentInstructions}
+                overrides={topicInstructionOverrides}
+                onOverrideChange={setTopicInstructionOverrides}
+                cutoffDates={topicCutoffDates}
+                onCutoffChange={setTopicCutoffDates}
+                showAttachments={useTopicAttachments}
+              />
             </div>
           </section>
 
@@ -468,7 +489,7 @@ export default function AssignmentEditPage() {
           <div className="flex gap-3">
             <button
               type="submit"
-              disabled={saving}
+              disabled={saving || isFullGradingActive}
               className="px-5 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
             >
               {saving ? 'Saving…' : 'Save Changes'}
@@ -488,7 +509,8 @@ export default function AssignmentEditPage() {
               <button
                 type="button"
                 onClick={() => setConfirmDelete(true)}
-                className="px-4 py-2 text-sm text-red-600 border border-red-300 rounded-lg hover:bg-red-50"
+                disabled={isFullGradingActive}
+                className="px-4 py-2 text-sm text-red-600 border border-red-300 rounded-lg hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-white"
               >
                 Delete Assignment
               </button>
@@ -498,7 +520,7 @@ export default function AssignmentEditPage() {
                 <button
                   type="button"
                   onClick={handleDelete}
-                  disabled={deleting}
+                  disabled={deleting || isFullGradingActive}
                   className="px-4 py-2 text-sm bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50"
                 >
                   {deleting ? 'Deleting…' : 'Yes, delete'}

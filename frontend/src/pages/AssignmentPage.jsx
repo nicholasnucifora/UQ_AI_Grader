@@ -1,4 +1,67 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, useCallback } from 'react'
+
+function fmtDate(raw) {
+  if (!raw) return null
+  let d
+  // Try ISO / standard formats that JS Date parses natively
+  const iso = new Date(raw)
+  if (!isNaN(iso)) {
+    d = iso
+  } else {
+    // Try DD/MM/YYYY HH:MM or DD-MM-YYYY HH:MM (RiPPLE CSV format)
+    const m = raw.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})(?:\s+(\d{1,2}):(\d{2}))?/)
+    if (!m) return raw
+    const [, dd, mm, yyyy, hh = '0', min = '0'] = m
+    d = new Date(+yyyy, +mm - 1, +dd, +hh, +min)
+    if (isNaN(d)) return raw
+  }
+  const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December']
+  const day = d.getDate()
+  const suffix = (day % 100 >= 11 && day % 100 <= 13) ? 'th' : ['th','st','nd','rd'][Math.min(day % 10, 3)]
+  const h = d.getHours()
+  const min = d.getMinutes().toString().padStart(2, '0')
+  const ampm = h >= 12 ? 'pm' : 'am'
+  const h12 = h % 12 || 12
+  return `${MONTHS[d.getMonth()]} ${day}${suffix}, ${h12}:${min} ${ampm}`
+}
+
+function fmtLateness(seconds) {
+  if (!seconds) return null
+  const days = Math.floor(seconds / 86400)
+  if (days > 0) return `${days} day${days !== 1 ? 's' : ''}`
+  const hours = Math.floor(seconds / 3600)
+  if (hours > 0) return `${hours} hour${hours !== 1 ? 's' : ''}`
+  return `${Math.max(1, Math.floor(seconds / 60))} min`
+}
+
+function fmtGradingFailReason(errorMessage) {
+  // Returns a human-readable tooltip string explaining why grading failed.
+  // If no error message, returns a generic "not reached" explanation.
+  if (!errorMessage) {
+    return 'This submission was not reached during the grading run. No error was recorded. Try regrading.'
+  }
+  const msg = errorMessage.toLowerCase()
+  let category
+  if (msg.includes('rate_limit') || msg.includes('rate limit') || msg.includes('429')) {
+    category = 'API rate limit reached'
+  } else if (msg.includes('overload') || msg.includes('529')) {
+    category = 'API overloaded'
+  } else if (msg.includes('did not return a grade tool call')) {
+    category = 'AI did not make the required tool call'
+  } else if (msg.includes('empty criterion_grades') || msg.includes('no criteria were graded')) {
+    category = 'AI returned the tool call but graded no criteria'
+  } else if (msg.includes('timeout') || msg.includes('timed out')) {
+    category = 'Request timed out'
+  } else if (msg.includes('connection') || msg.includes('network')) {
+    category = 'Network / connection error'
+  } else if (msg.includes('invalid') || msg.includes('parse') || msg.includes('json') || msg.includes('format')) {
+    category = 'AI response could not be parsed'
+  } else {
+    category = null
+  }
+  return category ? `${category}\n\n${errorMessage}` : errorMessage
+}
+
 import { useParams, Link, useNavigate } from 'react-router-dom'
 import Layout from '../components/Layout'
 import SubmitAssignmentModal from '../components/SubmitAssignmentModal'
@@ -19,8 +82,6 @@ export default function AssignmentPage() {
   const [rippleStats, setRippleStats] = useState(null)
   const [rippleImporting, setRippleImporting] = useState(false)
   const [rippleMessage, setRippleMessage] = useState(null)
-  const newCsvKey = `hasNewCsvData:${classId}:${assignmentId}`
-  const [hasNewCsvData, setHasNewCsvData] = useState(() => localStorage.getItem(newCsvKey) === 'true')
   const [rippleSkippedDetails, setRippleSkippedDetails] = useState([])
   const [showSkippedDetails, setShowSkippedDetails] = useState(false)
   const [clearingAiGrades, setClearingAiGrades] = useState(false)
@@ -30,6 +91,7 @@ export default function AssignmentPage() {
   const [gradingError, setGradingError] = useState(null)
   const [startingGrading, setStartingGrading] = useState(false)
   const [rubricData, setRubricData] = useState(null)
+  const [regradeProgress, setRegradeProgress] = useState(null) // null | { done, total }
   // Teacher grading queues — one per result type, idx managed inside the panel
   const [teacherResQueue, setTeacherResQueue] = useState([])
   const [teacherModQueue, setTeacherModQueue] = useState([])
@@ -56,6 +118,9 @@ export default function AssignmentPage() {
     setGradeJob(null)
     setGradeResults(null)
     setGradeReport(null)
+    setTeacherResQueue([])
+    setTeacherModQueue([])
+    setRegradeProgress(null)
     setClassName(null)
     setMyMemberRole(null)
     setLoadingAssignment(true)
@@ -71,15 +136,13 @@ export default function AssignmentPage() {
         api.getRippleStats(classId, assignmentId).then((d) => { if (!cancelled) setRippleStats(d) }).catch(() => {})
         api.getRubric(classId, assignmentId).then((d) => { if (!cancelled) setRubricData(d) }).catch(() => {})
         api.getTopics(classId, assignmentId).then((d) => { if (!cancelled) setTopics(d) }).catch(() => {})
+        api.getGradeResults(classId, assignmentId).then((d) => { if (!cancelled) setGradeResults(d) }).catch(() => {})
         api.getGradeStatus(classId, assignmentId)
           .then((job) => {
             if (cancelled) return
             setGradeJob(job ?? null)
-            if (job) {
-              api.getGradeResults(classId, assignmentId).then((d) => { if (!cancelled) setGradeResults(d) }).catch(() => {})
-              if (job.status === 'complete') {
-                api.getGradeReport(classId, assignmentId).then((d) => { if (!cancelled) setGradeReport(d) }).catch(() => {})
-              }
+            if (job?.status === 'complete') {
+              api.getGradeReport(classId, assignmentId).then((d) => { if (!cancelled) setGradeReport(d) }).catch(() => {})
             }
           })
           .catch(() => {})
@@ -103,15 +166,17 @@ export default function AssignmentPage() {
     setRippleMessage(null)
     try {
       await api.clearRippleData(classId, assignmentId)
-      // Also wipe grading if there is any
+      // Delete the grading job if one exists (RiPPLE cascade removes grade results, but the job row needs explicit deletion)
       if (gradeJob) {
         await api.deleteGrading(classId, assignmentId).catch(() => {})
-        setGradeJob(null)
-        setGradeResults(null)
-        setGradeReport(null)
-        setTeacherResQueue([])
-        setTeacherModQueue([])
       }
+      // Always reset all grade/marking state — backend now deletes grade results alongside ripple rows
+      setGradeJob(null)
+      setGradeResults(null)
+      setGradeReport(null)
+      setTeacherResQueue([])
+      setTeacherModQueue([])
+      setActiveMainTab('grades')
       setRippleStats({ resources: 0, moderations: 0 })
       setTopics([])
       setRippleMessage({ ok: true, text: 'RiPPLE data, AI grading, and teacher marking cleared.' })
@@ -128,12 +193,16 @@ export default function AssignmentPage() {
     setRippleMessage(null)
     try {
       await api.clearAiGrades(classId, assignmentId)
+      // Clear synchronously so the marking panel immediately shows nothing stale
       setGradeJob(null)
       setGradeResults(null)
       setGradeReport(null)
       setTeacherResQueue([])
       setTeacherModQueue([])
+      setActiveMainTab('grades')
       setRippleMessage({ ok: true, text: 'AI grades cleared. Teacher marks were preserved.' })
+      // Re-fetch so pending rows (for teacher-marked submissions) reappear in the grades tab
+      api.getGradeResults(classId, assignmentId).then(setGradeResults).catch(() => {})
     } catch (err) {
       setRippleMessage({ ok: false, text: err.message })
     } finally {
@@ -255,9 +324,9 @@ export default function AssignmentPage() {
         const label = result.type === 'resource' ? 'Resource' : 'Moderation'
         setRippleMessage({ ok: true, text: `${label} export — ${result.imported} new records added`, skipped: result.skipped })
         setRippleSkippedDetails(result.skipped_details || [])
-        if (result.imported > 0) { localStorage.setItem(newCsvKey, 'true'); setHasNewCsvData(true) }
         api.getRippleStats(classId, assignmentId).then(setRippleStats).catch(() => {})
         api.getTopics(classId, assignmentId).then(setTopics).catch(() => {})
+        api.getGradeResults(classId, assignmentId).then(setGradeResults).catch(() => {})
       }
     } catch (err) {
       setRippleMessage({ ok: false, text: err.message })
@@ -274,8 +343,6 @@ export default function AssignmentPage() {
       if (gradeJob.status === 'complete') {
         api.getGradeResults(classId, assignmentId).then(setGradeResults).catch(() => {})
         api.getGradeReport(classId, assignmentId).then(setGradeReport).catch(() => {})
-        localStorage.removeItem(newCsvKey)
-        setHasNewCsvData(false)
       }
       return
     }
@@ -286,8 +353,6 @@ export default function AssignmentPage() {
           if (job && job.status === 'complete') {
             api.getGradeResults(classId, assignmentId).then(setGradeResults).catch(() => {})
             api.getGradeReport(classId, assignmentId).then(setGradeReport).catch(() => {})
-            localStorage.removeItem(newCsvKey)
-            setHasNewCsvData(false)
           } else if (job && job.status === 'running') {
             api.getGradeResults(classId, assignmentId).then(setGradeResults).catch(() => {})
           }
@@ -300,8 +365,6 @@ export default function AssignmentPage() {
   async function handleStartGrading() {
     setGradingError(null)
     setStartingGrading(true)
-    localStorage.removeItem(newCsvKey)
-    setHasNewCsvData(false)
     try {
       const job = await api.startGrading(classId, assignmentId)
       setGradeJob(job)
@@ -351,8 +414,8 @@ export default function AssignmentPage() {
         return 0
       })
     return {
-      resource: sorted((results ?? []).filter((r) => r.result_type === 'resource' && r.status === 'complete')),
-      moderation: sorted((results ?? []).filter((r) => r.result_type === 'moderation' && r.status === 'complete')),
+      resource: sorted((results ?? []).filter((r) => r.result_type === 'resource' && (r.status === 'complete' || r.status === 'pending' || r.status === 'error' || r.status === 'excluded'))),
+      moderation: sorted((results ?? []).filter((r) => r.result_type === 'moderation' && (r.status === 'complete' || r.status === 'pending' || r.status === 'error' || r.status === 'excluded'))),
     }
   }
 
@@ -365,8 +428,53 @@ export default function AssignmentPage() {
   function handleGradeNow(result) {
     handleOpenTeacherTab()
     setActiveMainTab('marking')
-    setStartAtResultId(result.id)
+    setStartAtResultId({ id: result.id, nonce: Date.now() })
     window.scrollTo({ top: 0, behavior: 'smooth' })
+  }
+
+  async function handleGrantExtension(result) {
+    const itemType = result.result_type
+    const itemId = itemType === 'moderation' ? result.ripple_moderation_id : result.ripple_resource_id
+    try {
+      await api.grantExtension(classId, assignmentId, itemType, itemId)
+      // Refresh grade results to update the is_late / has_extension flags
+      const results = await api.getGradeResults(classId, assignmentId)
+      setGradeResults(results)
+    } catch (err) {
+      setGradingError(err.message)
+    }
+  }
+
+  async function handleRevokeExtension(result) {
+    const itemType = result.result_type
+    const itemId = itemType === 'moderation' ? result.ripple_moderation_id : result.ripple_resource_id
+    try {
+      await api.revokeExtension(classId, assignmentId, itemType, itemId)
+      const results = await api.getGradeResults(classId, assignmentId)
+      setGradeResults(results)
+    } catch (err) {
+      setGradingError(err.message)
+    }
+  }
+
+  async function handleAcknowledgeLate(result) {
+    try {
+      await api.acknowledgeLate(classId, assignmentId, result.id)
+      const results = await api.getGradeResults(classId, assignmentId)
+      setGradeResults(results)
+    } catch (err) {
+      setGradingError(err.message)
+    }
+  }
+
+  async function handleUndoDismiss(result) {
+    try {
+      await api.undoAcknowledgeLate(classId, assignmentId, result.id)
+      const results = await api.getGradeResults(classId, assignmentId)
+      setGradeResults(results)
+    } catch (err) {
+      setGradingError(err.message)
+    }
   }
 
   async function handleEmailResult(resultId, toEmail) {
@@ -396,6 +504,73 @@ export default function AssignmentPage() {
     }
   }
 
+  async function handleRedoAiGrade(resultId, amendment) {
+    const updated = await api.redoAiGrade(classId, assignmentId, resultId, { amendment: amendment || null })
+    const patch = (prev) => prev.map((r) => (r.id === resultId ? { ...r, ...updated } : r))
+    setGradeResults(patch)
+    setTeacherResQueue(patch)
+    setTeacherModQueue(patch)
+  }
+
+  async function handleSingleRegrade(result) {
+    try {
+      const updated = await api.redoAiGrade(classId, assignmentId, result.id, { amendment: null })
+      const patch = (prev) => prev.map((r) => (r.id === result.id ? { ...r, ...updated } : r))
+      setGradeResults(patch)
+      setTeacherResQueue(patch)
+      setTeacherModQueue(patch)
+    } catch (err) {
+      setGradingError(err.message)
+    }
+  }
+
+  const handleRegradeIssues = useCallback(async (targets) => {
+    setRegradeProgress({ done: 0, total: targets.length })
+    for (let i = 0; i < targets.length; i++) {
+      try {
+        const updated = await api.redoAiGrade(classId, assignmentId, targets[i].id, { amendment: null })
+        setGradeResults((prev) => prev.map((r) => (r.id === targets[i].id ? { ...r, ...updated } : r)))
+      } catch {
+        // submission stays in the list with its error status
+      }
+      setRegradeProgress({ done: i + 1, total: targets.length })
+    }
+    // Rebuild marking queues once all done
+    setGradeResults((prev) => {
+      if (!prev) return prev
+      const { resource, moderation } = buildTeacherQueues(prev)
+      setTeacherResQueue(resource)
+      setTeacherModQueue(moderation)
+      return prev
+    })
+    setRegradeProgress(null)
+  }, [classId, assignmentId]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Must be before early returns to satisfy Rules of Hooks
+  const issueResults = useMemo(() => {
+    if (!gradeJob || !gradeResults) return []
+    const jobDone = !gradeJob.is_preview && gradeJob.status === 'complete'
+    // Submissions imported AFTER the job completed are new data, not issues.
+    // We detect this by comparing result.created_at to gradeJob.completed_at.
+    const jobCompletedAt = jobDone && gradeJob.completed_at ? new Date(gradeJob.completed_at) : null
+    return gradeResults.filter((r) => {
+      if (r.status === 'excluded') return false
+      if (r.status === 'error') return true
+      if (r.is_late && !r.has_extension) return true  // needs extension/dismiss decision
+      if ((r.criterion_grades ?? []).length === 0) {
+        if (!jobDone) return false
+        // Only show as an issue if the result row existed before or during the job —
+        // i.e. created_at is at or before the job's completion timestamp.
+        if (jobCompletedAt && r.created_at) {
+          return new Date(r.created_at) <= jobCompletedAt
+        }
+        // No timestamps available: fall back to showing it (safe default)
+        return true
+      }
+      return false
+    })
+  }, [gradeJob, gradeResults])
+
   if (loadingAssignment) return <Layout><p className="text-gray-500">Loading…</p></Layout>
   if (!assignment) return <Layout><p className="text-red-600">Assignment not found.</p></Layout>
 
@@ -405,13 +580,23 @@ export default function AssignmentPage() {
   // Non-preview grading job
   const activeGradeJob = gradeJob && !gradeJob.is_preview ? gradeJob : null
   const status = activeGradeJob?.status
+  const isFullGradingActive = status === 'queued' || status === 'running'
   const isRnM = assignment.assignment_type === 'resources_and_moderations'
   const isComplete = status === 'complete' && gradeResults && gradeResults.length > 0
   const hasResources = rippleStats && rippleStats.resources > 0
   const resourceResults = gradeResults?.filter((r) => r.result_type === 'resource') ?? []
   const moderationResults = gradeResults?.filter((r) => r.result_type === 'moderation') ?? []
-  const resGradedCount = teacherResQueue.filter((r) => r.teacher_graded_at).length
-  const modGradedCount = teacherModQueue.filter((r) => r.teacher_graded_at).length
+  const resQueueTotal = (gradeResults ?? []).filter((r) => r.result_type === 'resource' && r.status === 'complete').length
+  const modQueueTotal = (gradeResults ?? []).filter((r) => r.result_type === 'moderation' && r.status === 'complete').length
+  const resGradedCount = (gradeResults ?? []).filter((r) => r.result_type === 'resource' && r.status === 'complete' && r.teacher_graded_at).length
+  const modGradedCount = (gradeResults ?? []).filter((r) => r.result_type === 'moderation' && r.status === 'complete' && r.teacher_graded_at).length
+  // Show "new submissions" banner whenever grading has run before but ungraded resources remain.
+  // Derived from live data so it persists across refreshes without needing localStorage.
+  const hasNewCsvData = isComplete && (rippleStats?.resources ?? 0) > resQueueTotal
+  // Late submissions still needing a decision — block the bulk regrade button until cleared
+  const pendingDecisions = issueResults.filter((r) => r.is_late && !r.has_extension && r.status !== 'excluded')
+  // Submissions that can actually be regraded (anything with no AI grade, excluding those awaiting a late decision)
+  const regradeableIssues = issueResults.filter((r) => (r.criterion_grades ?? []).length === 0 && !(r.is_late && !r.has_extension))
 
   // Topic-filtered results for Grades tab
   const filteredResults = topicFilter && gradeResults
@@ -459,8 +644,10 @@ export default function AssignmentPage() {
           </div>
           {isTeacher && (
             <button
+              disabled={isFullGradingActive}
               onClick={() => navigate(`/classes/${classId}/assignments/${assignmentId}/edit`)}
-              className="px-3 py-1.5 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 shrink-0"
+              title={isFullGradingActive ? 'Editing is disabled while AI grading is running.' : undefined}
+              className="px-3 py-1.5 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 shrink-0 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-white"
             >
               Edit
             </button>
@@ -731,6 +918,153 @@ export default function AssignmentPage() {
           </section>
         )}
 
+        {/* AI Grading Issues — teacher only, below RiPPLE section, above grades */}
+        {isTeacher && issueResults.length > 0 && (
+          <section className="bg-white border border-amber-200 rounded-xl p-5 mb-6">
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <h2 className="font-semibold text-gray-800">AI Grading Issues</h2>
+                <span className="text-xs font-semibold bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full">
+                  {issueResults.length}
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                {regradeProgress ? (
+                  <span className="text-sm text-gray-500">
+                    Regrading {regradeProgress.done} / {regradeProgress.total}…
+                  </span>
+                ) : regradeableIssues.length > 0 ? (
+                  <button
+                    onClick={() => handleRegradeIssues(regradeableIssues)}
+                    disabled={pendingDecisions.length > 0}
+                    title={pendingDecisions.length > 0 ? `Resolve ${pendingDecisions.length} late submission${pendingDecisions.length !== 1 ? 's' : ''} first` : undefined}
+                    className={`px-3 py-1.5 text-sm rounded-lg font-medium ${
+                      pendingDecisions.length > 0
+                        ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                        : 'bg-amber-500 text-white hover:bg-amber-600'
+                    }`}
+                  >
+                    Regrade {regradeableIssues.length} submission{regradeableIssues.length !== 1 ? 's' : ''}
+                  </button>
+                ) : null}
+              </div>
+            </div>
+
+            {pendingDecisions.length > 0 && regradeableIssues.length > 0 && (
+              <p className="text-xs text-amber-700 mb-3">
+                Resolve all late submissions below before regrading.
+              </p>
+            )}
+
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-gray-100 text-xs font-medium text-gray-500 uppercase tracking-wide">
+                  <th className="pb-2 text-left font-medium">Student</th>
+                  <th className="pb-2 text-left pl-3 font-medium">ID</th>
+                  <th className="pb-2 text-left pl-3 font-medium">Topic</th>
+                  <th className="pb-2 text-left pl-3 font-medium">Type</th>
+                  <th className="pb-2 text-left pl-3 font-medium">Issue</th>
+                  <th className="pb-2 pl-3"></th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-50">
+                {[...issueResults]
+                  .sort((a, b) => {
+                    // Late pending decisions first, then extension-granted, then errors/missed
+                    const rank = (r) => {
+                      if (r.is_late && !r.has_extension && r.status !== 'excluded') return 0
+                      if (r.has_extension && (r.criterion_grades ?? []).length === 0) return 1
+                      return 2  // errors and missed submissions
+                    }
+                    return rank(a) - rank(b)
+                  })
+                  .map((r) => {
+                    const studentName = r.result_type === 'moderation'
+                      ? (r.moderation_user_name || r.moderation_user_id || '—')
+                      : (r.primary_author_name || r.primary_author_id || '—')
+                    const isLateDecision = r.is_late && !r.has_extension && r.status !== 'excluded'
+                    const isError = r.status === 'error'
+                    const isExtensionPending = r.has_extension && (r.criterion_grades ?? []).length === 0
+                    const isMissed = !isLateDecision && !isError && !isExtensionPending && (r.criterion_grades ?? []).length === 0
+                    const canRegradeRow = !isLateDecision && (r.criterion_grades ?? []).length === 0 && !regradeProgress
+                    const topic = r.resource_topics?.trim() || null
+                    const cutoffRaw = topic ? assignment.topic_cutoff_dates?.[topic] : null
+                    return (
+                      <tr key={r.id} className="hover:bg-gray-50/60">
+                        <td className="py-2.5 text-gray-800">{studentName}</td>
+                        <td className="py-2.5 pl-3 font-mono text-xs text-gray-600">{r.resource_id}</td>
+                        <td className="py-2.5 pl-3 text-xs text-gray-500">{topic || <span className="text-gray-300">—</span>}</td>
+                        <td className="py-2.5 pl-3 text-gray-500 capitalize">{r.result_type}</td>
+                        <td className="py-2.5 pl-3">
+                          {isLateDecision && (
+                            <div>
+                              <span className="text-orange-600 font-medium">Late — needs decision</span>
+                              <div className="mt-0.5 space-y-0.5 text-xs text-gray-400">
+                                {cutoffRaw && (
+                                  <div>Due: <span className="text-gray-500">{fmtDate(cutoffRaw)}</span></div>
+                                )}
+                                {r.submission_date && (
+                                  <div>
+                                    Submitted: <span className="text-gray-500">{fmtDate(r.submission_date)}</span>
+                                    {r.seconds_late != null && (
+                                      <span className="text-orange-500 ml-1">({fmtLateness(r.seconds_late)} late)</span>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          )}
+                          {isExtensionPending && (
+                            <span className="text-indigo-600 font-medium">Extension granted — not yet graded</span>
+                          )}
+                          {isError && (
+                            <span className="flex items-center gap-1">
+                              <span className="text-red-600 font-medium">AI error</span>
+                              <span title={fmtGradingFailReason(r.error_message)} className="text-gray-400 cursor-help select-none">ⓘ</span>
+                            </span>
+                          )}
+                          {isMissed && (
+                            <span className="flex items-center gap-1">
+                              <span className="text-amber-600 font-medium">Not graded</span>
+                              <span title={fmtGradingFailReason(r.error_message)} className="text-gray-400 cursor-help select-none">ⓘ</span>
+                            </span>
+                          )}
+                        </td>
+                        <td className="py-2.5 pl-3 text-right whitespace-nowrap">
+                          {isLateDecision && (
+                            <div className="flex items-center justify-end gap-1.5">
+                              <button
+                                onClick={() => handleGrantExtension(r)}
+                                className="text-xs text-indigo-600 hover:text-indigo-800 font-medium"
+                              >
+                                Grant extension
+                              </button>
+                              <span className="text-gray-300">|</span>
+                              <button
+                                onClick={() => handleAcknowledgeLate(r)}
+                                className="text-xs text-gray-400 hover:text-gray-600"
+                              >
+                                Dismiss
+                              </button>
+                            </div>
+                          )}
+                          {canRegradeRow && (
+                            <button
+                              onClick={() => handleSingleRegrade(r)}
+                              className="text-xs text-amber-700 underline hover:no-underline"
+                            >
+                              Regrade
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    )
+                  })}
+              </tbody>
+            </table>
+          </section>
+        )}
+
         {/* Main grading tabs — teacher only */}
         {isTeacher && (
           <section className="bg-white border border-gray-200 rounded-xl mb-6 overflow-hidden">
@@ -755,8 +1089,8 @@ export default function AssignmentPage() {
                     >
                       Marking
                       <span className="ml-1.5 text-xs opacity-60">
-                        {resGradedCount}/{teacherResQueue.length}
-                        {isRnM && teacherModQueue.length > 0 && ` · ${modGradedCount}/${teacherModQueue.length}`}
+                        {resGradedCount}/{resQueueTotal}
+                        {isRnM && modQueueTotal > 0 && ` · ${modGradedCount}/${modQueueTotal}`}
                       </span>
                     </TabButton>
                     <TabButton active={activeMainTab === 'statistics'} onClick={() => setActiveMainTab('statistics')}>
@@ -798,11 +1132,16 @@ export default function AssignmentPage() {
                   <div className={activeMainTab !== 'grades' ? 'hidden' : ''}>
                     <StudentOverviewTable
                       results={filteredResults}
+                      allTopics={topics}
                       emailDomain={user?.student_email_domain || ''}
                       onEmail={handleEmailResult}
                       onEmailAll={handleEmailStudentAll}
                       onEmailTopic={handleEmailStudentTopic}
                       onGradeNow={handleGradeNow}
+                      onGrantExtension={handleGrantExtension}
+                      onAcknowledgeLate={handleAcknowledgeLate}
+                      onUndoDismiss={handleUndoDismiss}
+                      onRevokeExtension={handleRevokeExtension}
                       assignment={assignment}
                       resourceRubric={rubricData?.rubric ?? null}
                       moderationRubric={rubricData?.moderation_rubric ?? null}
@@ -818,6 +1157,7 @@ export default function AssignmentPage() {
                       resourceRubric={rubricData?.rubric ?? null}
                       moderationRubric={rubricData?.moderation_rubric ?? null}
                       onSave={handleSaveTeacherGrade}
+                      onRedoGrade={handleRedoAiGrade}
                       isRnM={isRnM}
                       startAtResultId={startAtResultId}
                     />
@@ -839,7 +1179,12 @@ export default function AssignmentPage() {
                           resourceRubric={rubricData?.rubric ?? null}
                           moderationRubric={rubricData?.moderation_rubric ?? null}
                         />
-                        <TopicBreakdownTable data={filteredTopicBreakdown} />
+                        <TopicBreakdownTable
+                          results={resourceResults}
+                          assignment={assignment}
+                          rubric={rubricData?.rubric ?? null}
+                          topicFilter={topicFilter}
+                        />
                       </div>
                     ) : (
                       <p className="text-sm text-gray-400 italic">Statistics will appear after grading completes.</p>
@@ -914,7 +1259,7 @@ function TeacherSubmissionsTable({ submissions }) {
             <tr key={s.id} className="bg-white hover:bg-gray-50">
               <td className="px-4 py-3 font-medium text-gray-800">{s.student_user_id}</td>
               <td className="px-4 py-3 text-gray-500">
-                {new Date(s.submitted_at).toLocaleString()}
+                {fmtDate(s.submitted_at)}
               </td>
               <td className="px-4 py-3 text-gray-600 truncate max-w-xs">{s.content}</td>
             </tr>
@@ -929,7 +1274,7 @@ function StudentSubmissionView({ submission }) {
   return (
     <div className="bg-white border border-gray-200 rounded-xl p-5">
       <p className="text-xs text-gray-500 mb-3">
-        Submitted {new Date(submission.submitted_at).toLocaleString()}
+        Submitted {fmtDate(submission.submitted_at)}
       </p>
       <p className="text-sm text-gray-700 whitespace-pre-wrap">{submission.content}</p>
     </div>
@@ -967,8 +1312,39 @@ function PctBar({ pct, colour = 'bg-indigo-500' }) {
 }
 
 
-function TopicBreakdownTable({ data }) {
-  if (!data || data.length === 0) return null
+function TopicBreakdownTable({ results, assignment, rubric, topicFilter }) {
+  const maxPossible = computeMaxPoints(rubric)
+  const effAssignment = getEffectiveAssignment(assignment, 'resource')
+  const isScaled = !!(effAssignment?.grade_scale_enabled && effAssignment?.grade_scale_max && maxPossible > 0)
+  const scaleMax = isScaled ? Number(effAssignment.grade_scale_max) : maxPossible
+
+  const data = useMemo(() => {
+    const topicMap = {}
+    for (const r of results ?? []) {
+      if (r.result_type !== 'resource' || r.status !== 'complete') continue
+      const topicsRaw = (r.resource_topics ?? '').split(',').map((t) => t.trim()).filter(Boolean)
+      const topics = topicsRaw.length > 0 ? topicsRaw : ['(no topic)']
+      const rawScore = (r.criterion_grades ?? []).reduce((s, g) => s + (g.points_awarded || 0), 0)
+      const grade = isScaled ? (applyScaling(rawScore, maxPossible, effAssignment) ?? rawScore) : rawScore
+      for (const topic of topics) {
+        if (!topicMap[topic]) topicMap[topic] = []
+        topicMap[topic].push(grade)
+      }
+    }
+    return Object.entries(topicMap)
+      .map(([topic, grades]) => {
+        const avg = grades.reduce((a, b) => a + b, 0) / grades.length
+        const pct = scaleMax > 0 ? (avg / scaleMax) * 100 : 0
+        return { topic, count: grades.length, avg_grade: avg, avg_pct: Math.round(pct * 10) / 10 }
+      })
+      .filter((t) => !topicFilter || t.topic === topicFilter)
+      .sort((a, b) => a.avg_pct - b.avg_pct)
+  }, [results, isScaled, maxPossible, effAssignment, scaleMax, topicFilter])
+
+  if (data.length === 0) return null
+
+  const dp = effAssignment?.grade_rounding === 'half' ? 1 : (effAssignment?.grade_decimal_places ?? 2)
+
   return (
     <div>
       <h4 className="text-sm font-semibold text-gray-700 mb-3">Performance by Topic</h4>
@@ -977,7 +1353,7 @@ function TopicBreakdownTable({ data }) {
           <tr>
             <th className="px-4 py-2 text-left">Topic</th>
             <th className="px-4 py-2 text-left">Resources</th>
-            <th className="px-4 py-2 text-left">Avg score</th>
+            <th className="px-4 py-2 text-left">{isScaled ? `Avg grade (/ ${scaleMax})` : 'Avg score'}</th>
             <th className="px-4 py-2 text-left w-40">Avg %</th>
           </tr>
         </thead>
@@ -988,7 +1364,7 @@ function TopicBreakdownTable({ data }) {
               <tr key={t.topic} className="bg-white">
                 <td className="px-4 py-2 text-gray-700">{t.topic}</td>
                 <td className="px-4 py-2 text-gray-500">{t.count}</td>
-                <td className="px-4 py-2 text-gray-700">{t.avg_score}</td>
+                <td className="px-4 py-2 text-gray-700">{t.avg_grade.toFixed(dp)}</td>
                 <td className="px-4 py-2 w-40">
                   <PctBar pct={t.avg_pct} colour={colour} />
                 </td>
@@ -1138,9 +1514,10 @@ function GradeDistributionChart({ results, assignment, resourceRubric, moderatio
   const studentData = useMemo(() => {
     const map = new Map()
     for (const r of results ?? []) {
-      if (r.result_type === 'resource' && r.primary_author_id) {
-        if (!map.has(r.primary_author_id)) map.set(r.primary_author_id, { resources: [], moderations: [] })
-        map.get(r.primary_author_id).resources.push(r)
+      if (r.result_type === 'resource') {
+        const key = r.primary_author_id || `__res_${r.ripple_resource_id}`
+        if (!map.has(key)) map.set(key, { resources: [], moderations: [] })
+        map.get(key).resources.push(r)
       }
       if (r.result_type === 'moderation' && r.moderation_user_id) {
         if (!map.has(r.moderation_user_id)) map.set(r.moderation_user_id, { resources: [], moderations: [] })

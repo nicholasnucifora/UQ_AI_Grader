@@ -21,10 +21,17 @@ class AIService:
         }
         return mapping.get(tier or "haiku", settings.anthropic_haiku)
 
-    _DEFAULT_FEEDBACK_FORMAT = (
-        "Be direct and accurate. Award the level the work genuinely deserves — "
-        "do not soften grades. If a criterion is not met at all, award 0. "
-        "If it fully meets the top standard, award full marks."
+    # Always injected — ensures scoring integrity regardless of teacher customisation.
+    _GRADING_DISCIPLINE = (
+        "Award the level the work genuinely deserves — do not soften or inflate grades. "
+        "If a criterion is not met at all, award 0; if it fully meets the top standard, award full marks. "
+        "Do not pad feedback to appear thorough — only include what is genuinely relevant to the grade awarded."
+    )
+
+    # Used when the teacher has not provided a custom feedback format.
+    _DEFAULT_FEEDBACK_STYLE = (
+        "Explain why this level was awarded. "
+        "If it is not the top level, state specifically what would be needed to achieve full marks."
     )
 
     def _build_context_section(self, context: dict | None) -> str:
@@ -40,6 +47,8 @@ class AIService:
             parts.append(f"**Marking guidance:** {context['marking_criteria']}")
         if context.get("additional_notes"):
             parts.append(f"**Additional instructions:** {context['additional_notes']}")
+        if context.get("amendment"):
+            parts.append(f"**Important correction for this re-grade:** {context['amendment']}")
         if not parts:
             return ""
         return "## Grading Context\n\n" + "\n\n".join(parts) + "\n\n"
@@ -79,7 +88,8 @@ class AIService:
         context: optional dict with class_description, assignment_description,
                  marking_criteria, additional_notes.
         """
-        feedback_instruction = feedback_format.strip() or self._DEFAULT_FEEDBACK_FORMAT
+        feedback_style = feedback_format.strip() or self._DEFAULT_FEEDBACK_STYLE
+        feedback_instruction = f"{self._GRADING_DISCIPLINE} {feedback_style}"
 
         grade_tool = {
             "name": "submit_grade",
@@ -118,7 +128,7 @@ class AIService:
                                 },
                                 "feedback": {
                                     "type": "string",
-                                    "description": "Specific feedback for this criterion: explain why this level was awarded. If it is not the top level, explain what would be needed to achieve full marks.",
+                                    "description": f"Feedback for this criterion. {feedback_instruction}",
                                 },
                             },
                             "required": [
@@ -208,7 +218,8 @@ class AIService:
         assess how well the moderator engaged with and understood the submission.
         Returns the same shape as grade_submission.
         """
-        feedback_instruction = feedback_format.strip() or self._DEFAULT_FEEDBACK_FORMAT
+        feedback_style = feedback_format.strip() or self._DEFAULT_FEEDBACK_STYLE
+        feedback_instruction = f"{self._GRADING_DISCIPLINE} {feedback_style}"
 
         grade_tool = {
             "name": "submit_grade",
@@ -230,7 +241,7 @@ class AIService:
                                 "level_id": {"type": "string"},
                                 "level_title": {"type": "string"},
                                 "points_awarded": {"type": "number"},
-                                "feedback": {"type": "string"},
+                                "feedback": {"type": "string", "description": f"Feedback for this criterion. {feedback_instruction}"},
                             },
                             "required": [
                                 "criterion_id", "criterion_name", "level_id",

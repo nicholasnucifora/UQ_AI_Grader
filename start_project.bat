@@ -85,7 +85,7 @@ start "Frontend (Vite)" cmd /k "cd frontend && npm install && npm run dev"
 start "Backend (FastAPI)" cmd /k "cd backend && pip install -r requirements.txt && alembic upgrade head && uvicorn app.main:app --reload"
 
 :: ── Worker ────────────────────────────────────────────────────────────────
-start "Worker" cmd /k "cd backend && python worker.py"
+start "Worker" cmd /k "cd backend && alembic upgrade head && python worker.py"
 
 :: ── Open browser ──────────────────────────────────────────────────────────
 timeout /t 5 /nobreak >nul

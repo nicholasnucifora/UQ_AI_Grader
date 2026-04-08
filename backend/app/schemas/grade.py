@@ -46,6 +46,7 @@ class GradeResultOut(BaseModel):
     overall_feedback: str | None = None
     error_message: str | None
     graded_at: datetime
+    created_at: datetime | None = None
     # Topic(s) of the resource (single topic after CSV import filtering)
     resource_topics: str = ""
     # RiPPLE status of the resource (e.g. Approved, Removed, Needs Moderation)
@@ -54,14 +55,25 @@ class GradeResultOut(BaseModel):
     resource_sections: list = []
     # For moderation results: the moderation comment text
     moderation_comment: str | None = None
+    # Submission date from the RiPPLE CSV (Timestamp for resources, Created At for moderations)
+    submission_date: str | None = None
     # Teacher manual grading
+    rubric_max_points_json: dict | None = None
     teacher_criterion_grades: list[CriterionGrade] | None = None
     teacher_overall_feedback: str | None = None
     teacher_graded_at: datetime | None = None
     teacher_graded_by: str | None = None
+    # Late submission tracking
+    is_late: bool = False
+    has_extension: bool = False
+    seconds_late: int | None = None
 
     model_config = {"from_attributes": True}
 
 
 class TeacherGradeIn(BaseModel):
     criterion_grades: list[CriterionGrade]
+
+
+class RedoGradeIn(BaseModel):
+    amendment: str | None = None

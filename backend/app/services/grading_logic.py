@@ -19,6 +19,95 @@ from app.services.ai_service import ai_service
 logger = logging.getLogger(__name__)
 
 
+def parse_ripple_timestamp(raw: str | None) -> datetime | None:
+    """Parse a RiPPLE CSV timestamp or cutoff date into a datetime. Returns None if unparseable."""
+    if not raw or not raw.strip():
+        return None
+    s = raw.strip()
+    for fmt in (
+        "%d-%m-%Y %H:%M", "%d/%m/%Y %H:%M",
+        "%d-%m-%Y", "%d/%m/%Y",
+        "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M:%S", "%Y-%m-%d",
+    ):
+        try:
+            return datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def is_submission_late(
+    timestamp_str: str | None,
+    topic: str,
+    cutoff_dates: dict,
+    has_extension: bool,
+) -> bool:
+    """Return True if the submission is after the topic's cutoff and has no extension.
+
+    If the submission has no timestamp but a cutoff IS set and is in the past,
+    the submission is treated as late. This handles CSVs without timestamp data —
+    setting a cutoff effectively blocks the entire topic from grading.
+    """
+    if has_extension:
+        return False
+    cutoff_str = cutoff_dates.get(topic.strip())
+    if not cutoff_str:
+        return False
+    cutoff_dt = parse_ripple_timestamp(cutoff_str)
+    if cutoff_dt is None:
+        return False
+
+    submission_dt = parse_ripple_timestamp(timestamp_str)
+    if submission_dt is None:
+        # No timestamp on the submission — treat as NOT late (fail-open)
+        return False
+
+    return submission_dt > cutoff_dt
+
+
+def _filter_late_resources(
+    resource_ids: list[int], assignment_id: int, cutoff_dates: dict, db: Session,
+) -> list[int]:
+    """Remove resources whose submission is after their topic's cutoff date."""
+    if not cutoff_dates:
+        return resource_ids
+    resources = db.query(RippleResource).filter(RippleResource.id.in_(resource_ids)).all()
+    return [
+        r.id for r in resources
+        if not is_submission_late(r.timestamp, r.topics, cutoff_dates, r.has_extension)
+    ]
+
+
+def _filter_late_moderations(
+    moderation_ids: list[int], assignment_id: int, cutoff_dates: dict, db: Session,
+) -> list[int]:
+    """Remove moderations whose submission is after their topic's cutoff date."""
+    if not cutoff_dates:
+        return moderation_ids
+    moderations = db.query(RippleModeration).filter(RippleModeration.id.in_(moderation_ids)).all()
+    # Build resource_id → topic lookup
+    resource_ids_needed = {m.resource_id for m in moderations}
+    resources = (
+        db.query(RippleResource)
+        .filter(
+            RippleResource.assignment_id == assignment_id,
+            RippleResource.resource_id.in_(resource_ids_needed),
+        )
+        .all()
+    )
+    resource_topic = {r.resource_id: r.topics for r in resources}
+    return [
+        m.id for m in moderations
+        if not is_submission_late(
+            m.created_at,
+            resource_topic.get(m.resource_id, ""),
+            cutoff_dates,
+            m.has_extension,
+        )
+    ]
+
+
 def _find_grade_result(
     db: Session,
     assignment_id: int,
@@ -27,14 +116,35 @@ def _find_grade_result(
     ripple_moderation_id: int | None = None,
 ) -> "GradeResult | None":
     """Return an existing GradeResult for this resource/moderation, or None."""
-    q = db.query(GradeResult).filter(
-        GradeResult.assignment_id == assignment_id,
-        GradeResult.ripple_resource_id == ripple_resource_id,
-        GradeResult.result_type == result_type,
+    if result_type == "moderation" and ripple_moderation_id is not None:
+        return (
+            db.query(GradeResult)
+            .filter(
+                GradeResult.assignment_id == assignment_id,
+                GradeResult.result_type == result_type,
+                GradeResult.ripple_moderation_id == ripple_moderation_id,
+            )
+            .first()
+        )
+
+    return (
+        db.query(GradeResult)
+        .filter(
+            GradeResult.assignment_id == assignment_id,
+            GradeResult.ripple_resource_id == ripple_resource_id,
+            GradeResult.result_type == result_type,
+        )
+        .first()
     )
-    if ripple_moderation_id is not None:
-        q = q.filter(GradeResult.ripple_moderation_id == ripple_moderation_id)
-    return q.first()
+
+
+def _build_rubric_max_points(rubric_dict: dict) -> dict:
+    """Build {criterion_id: max_points} from a rubric dict. Stored with each grade result."""
+    result = {}
+    for c in rubric_dict.get("criteria", []):
+        levels = c.get("levels", [])
+        result[c["id"]] = max((l["points"] for l in levels), default=0) if levels else 0
+    return result
 
 
 def _upsert_grade_result(db: Session, existing: "GradeResult | None", **kwargs) -> "GradeResult":
@@ -95,13 +205,18 @@ def grade_assignment(assignment_id: int, db: Session) -> None:
         .all()
     ]
 
+    # Filter out late submissions (after topic cutoff, no extension)
+    topic_cutoff_dates = assignment.topic_cutoff_dates or {}
+    resource_ids = _filter_late_resources(resource_ids, assignment_id, topic_cutoff_dates, db)
+    moderation_ids = _filter_late_moderations(moderation_ids, assignment_id, topic_cutoff_dates, db)
+
     done_resource_ids = {
         row[0]
         for row in db.query(GradeResult.ripple_resource_id)
         .filter(
             GradeResult.assignment_id == assignment_id,
             GradeResult.result_type == "resource",
-            GradeResult.status == "complete",
+            GradeResult.status.in_(("complete", "excluded")),
         )
         .all()
     }
@@ -111,26 +226,46 @@ def grade_assignment(assignment_id: int, db: Session) -> None:
         .filter(
             GradeResult.assignment_id == assignment_id,
             GradeResult.result_type == "moderation",
-            GradeResult.status == "complete",
+            GradeResult.status.in_(("complete", "excluded")),
             GradeResult.ripple_moderation_id.isnot(None),
         )
         .all()
     }
 
-    # Preview mode: limit to a small sample of one type only, drawn from ungraded items
-    # so that adding new data after a full run gives a valid preview of those new items.
+    # Preview mode: use the pre-computed sample IDs from the API endpoint if available.
+    # These were computed in the API session which reliably sees all committed data,
+    # avoiding any cross-session visibility issues with SQLite.
     # Explicitly cast is_preview to bool — SQLite returns it as int (0/1)
     if bool(job.is_preview):
-        sample = max(1, int(job.preview_sample_size or 3))
         ptype = job.preview_type or "resource"
-        if ptype == "moderation":
-            resource_ids = []
-            ungraded_mod_ids = [mid for mid in moderation_ids if mid not in done_moderation_ids]
-            moderation_ids = ungraded_mod_ids[:sample]
+        pre_computed = job.preview_item_ids
+
+        if pre_computed:
+            # Use the exact IDs chosen by the API endpoint — they are already
+            # filtered for done + late, so skip the pending filter entirely.
+            logger.info(
+                "Preview using pre-computed IDs: type=%s, ids=%s", ptype, pre_computed,
+            )
+            if ptype == "moderation":
+                resource_ids = []
+                moderation_ids = list(pre_computed)
+            else:
+                resource_ids = list(pre_computed)
+                moderation_ids = []
+            # Skip the done-filter below — pre-computed IDs are authoritative
+            done_resource_ids = set()
+            done_moderation_ids = set()
         else:
-            ungraded_resource_ids = [rid for rid in resource_ids if rid not in done_resource_ids]
-            resource_ids = ungraded_resource_ids[:sample]
-            moderation_ids = []
+            # Fallback for older jobs without pre-computed IDs
+            sample = max(1, int(job.preview_sample_size or 3))
+            if ptype == "moderation":
+                resource_ids = []
+                ungraded_mod_ids = [mid for mid in moderation_ids if mid not in done_moderation_ids]
+                moderation_ids = ungraded_mod_ids[:sample]
+            else:
+                ungraded_resource_ids = [rid for rid in resource_ids if rid not in done_resource_ids]
+                resource_ids = ungraded_resource_ids[:sample]
+                moderation_ids = []
 
     # Filter to only items that still need grading
     pending_resource_ids = [rid for rid in resource_ids if rid not in done_resource_ids]
@@ -202,6 +337,7 @@ def grade_assignment(assignment_id: int, db: Session) -> None:
                 overall_feedback=result.get("overall_feedback", ""),
                 error_message=None,
                 graded_at=datetime.now(timezone.utc),
+                rubric_max_points_json=_build_rubric_max_points(resource_rubric_dict),
             )
             db.query(GradingJob).filter(GradingJob.id == job_id).update({
                 "graded": GradingJob.graded + 1,
@@ -317,6 +453,7 @@ def grade_assignment(assignment_id: int, db: Session) -> None:
                 overall_feedback=result.get("overall_feedback", ""),
                 error_message=None,
                 graded_at=datetime.now(timezone.utc),
+                rubric_max_points_json=_build_rubric_max_points(moderation_rubric_dict),
             )
             db.query(GradingJob).filter(GradingJob.id == job_id).update({
                 "graded": GradingJob.graded + 1,
@@ -360,28 +497,6 @@ def grade_assignment(assignment_id: int, db: Session) -> None:
             job.errors,
         )
 
-
-def _has_good_spread(assignment_id: int, max_possible: float, db: Session, result_type: str = "resource") -> bool:
-    """True if results include at least one high-scoring AND one low-scoring submission.
-    Requires a result in the top 40% AND a result in the bottom 40% of max score."""
-    results = (
-        db.query(GradeResult)
-        .filter(
-            GradeResult.assignment_id == assignment_id,
-            GradeResult.result_type == result_type,
-            GradeResult.status == "complete",
-        )
-        .all()
-    )
-    if len(results) < 2:
-        return False
-    scores = [
-        sum(g.get("points_awarded", 0) for g in (r.criterion_grades or []))
-        for r in results
-    ]
-    has_high = max(scores) >= max_possible * 0.60
-    has_low = min(scores) <= max_possible * 0.40
-    return has_high and has_low
 
 
 def grade_preview_extension(assignment_id: int, db: Session, max_total: int = 15) -> None:
@@ -433,12 +548,7 @@ def grade_preview_extension(assignment_id: int, db: Session, max_total: int = 15
         )
         return
 
-    # Resource extension (original behaviour)
-    rubric_for_spread = resource_rubric_dict
-    max_possible = sum(
-        max((l["points"] for l in c.get("levels", [])), default=0)
-        for c in rubric_for_spread.get("criteria", [])
-    )
+    # Resource extension
 
     all_resource_ids = [
         row[0]
@@ -447,20 +557,37 @@ def grade_preview_extension(assignment_id: int, db: Session, max_total: int = 15
         .all()
     ]
 
+    # Filter out late submissions
+    topic_cutoff_dates = assignment.topic_cutoff_dates or {}
+    all_resource_ids = _filter_late_resources(all_resource_ids, assignment_id, topic_cutoff_dates, db)
+
+    # All completed/excluded results (any job) — used to avoid re-grading
     done_resource_ids = {
         row[0]
         for row in db.query(GradeResult.ripple_resource_id)
         .filter(
             GradeResult.assignment_id == assignment_id,
             GradeResult.result_type == "resource",
-            GradeResult.status == "complete",
+            GradeResult.status.in_(("complete", "excluded")),
         )
         .all()
     }
 
+    # Only count THIS preview job's results for progress tracking
+    preview_count = (
+        db.query(GradeResult)
+        .filter(
+            GradeResult.assignment_id == assignment_id,
+            GradeResult.result_type == "resource",
+            GradeResult.job_id == job_id,
+            GradeResult.status == "complete",
+        )
+        .count()
+    )
+
     remaining_ids = [rid for rid in all_resource_ids if rid not in done_resource_ids]
     random.shuffle(remaining_ids)
-    current_total = len(done_resource_ids)
+    current_total = preview_count
 
     if not remaining_ids or current_total >= max_total:
         job.status = "complete"
@@ -529,6 +656,7 @@ def grade_preview_extension(assignment_id: int, db: Session, max_total: int = 15
                 overall_feedback=result.get("overall_feedback", ""),
                 error_message=None,
                 graded_at=datetime.now(timezone.utc),
+                rubric_max_points_json=_build_rubric_max_points(resource_rubric_dict),
             )
             db.query(GradingJob).filter(GradingJob.id == job_id).update({
                 "graded": GradingJob.graded + 1,
@@ -542,10 +670,6 @@ def grade_preview_extension(assignment_id: int, db: Session, max_total: int = 15
             db.rollback()
             current_total += 1
             continue
-
-        if max_possible > 0 and _has_good_spread(assignment_id, max_possible, db, "resource"):
-            logger.info("Extend preview: good spread achieved at %d samples", current_total)
-            break
 
     job = db.get(GradingJob, job_id)
     if job and job.status != "cancelled":
@@ -566,12 +690,8 @@ def _extend_moderation_preview(
     feedback_format: str,
     max_total: int = 15,
 ) -> None:
-    """Internal helper: extend a moderation preview, seeking grade spread."""
+    """Internal helper: extend a moderation preview."""
     job_id = job.id
-    max_possible = sum(
-        max((l["points"] for l in c.get("levels", [])), default=0)
-        for c in moderation_rubric_dict.get("criteria", [])
-    )
 
     all_moderation_ids = [
         row[0]
@@ -580,21 +700,38 @@ def _extend_moderation_preview(
         .all()
     ]
 
+    # Filter out late submissions
+    topic_cutoff_dates = assignment.topic_cutoff_dates or {}
+    all_moderation_ids = _filter_late_moderations(all_moderation_ids, assignment_id, topic_cutoff_dates, db)
+
+    # All completed/excluded moderation results (any job) — used to avoid re-grading
     done_moderation_ids = {
         row[0]
         for row in db.query(GradeResult.ripple_moderation_id)
         .filter(
             GradeResult.assignment_id == assignment_id,
             GradeResult.result_type == "moderation",
-            GradeResult.status == "complete",
+            GradeResult.status.in_(("complete", "excluded")),
             GradeResult.ripple_moderation_id.isnot(None),
         )
         .all()
     }
 
+    # Only count THIS preview job's results for progress tracking
+    preview_count = (
+        db.query(GradeResult)
+        .filter(
+            GradeResult.assignment_id == assignment_id,
+            GradeResult.result_type == "moderation",
+            GradeResult.job_id == job_id,
+            GradeResult.status == "complete",
+        )
+        .count()
+    )
+
     remaining_ids = [mid for mid in all_moderation_ids if mid not in done_moderation_ids]
     random.shuffle(remaining_ids)
-    current_total = len(done_moderation_ids)
+    current_total = preview_count
 
     if not remaining_ids or current_total >= max_total:
         job.status = "complete"
@@ -669,6 +806,7 @@ def _extend_moderation_preview(
                 overall_feedback=result.get("overall_feedback", ""),
                 error_message=None,
                 graded_at=datetime.now(timezone.utc),
+                rubric_max_points_json=_build_rubric_max_points(moderation_rubric_dict),
             )
             db.query(GradingJob).filter(GradingJob.id == job_id).update({
                 "graded": GradingJob.graded + 1,
@@ -682,10 +820,6 @@ def _extend_moderation_preview(
             db.rollback()
             current_total += 1
             continue
-
-        if max_possible > 0 and _has_good_spread(assignment_id, max_possible, db, "moderation"):
-            logger.info("Extend moderation preview: good spread achieved at %d samples", current_total)
-            break
 
     job = db.get(GradingJob, job_id)
     if job and job.status != "cancelled":

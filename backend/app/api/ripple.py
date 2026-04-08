@@ -1,4 +1,6 @@
 import csv
+import html
+import re
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from sqlalchemy.orm import Session
@@ -6,10 +8,28 @@ from sqlalchemy.orm import Session
 from app.api.classes import _require_class_teacher
 from app.core.database import get_db
 from app.models.assignment import Assignment
+from app.models.grade import GradeResult, GradingJob
 from app.models.ripple import RippleModeration, RippleResource
 from app.models.user import User
 from app.schemas.ripple import RippleImportResult, RippleStats, SkippedRow
 from app.services.auth_service import get_current_user
+
+def _clean_section(text: str) -> str:
+    """Clean a raw RiPPLE CSV section string.
+
+    RiPPLE encodes '&' as 'ripple_amp_code' in its CSV exports and wraps
+    content in HTML tags from its rich-text editor. This strips all of that
+    so the AI sees plain readable text.
+    """
+    if not isinstance(text, str):
+        return ""
+    text = text.replace("ripple_amp_code", "&")
+    text = re.sub(r"<[^>]+>", " ", text)        # strip HTML tags
+    text = html.unescape(text)                    # decode &amp; &lt; etc.
+    text = text.replace("\u00a0", " ")            # non-breaking spaces → regular space
+    text = re.sub(r"\s+", " ", text).strip()      # collapse whitespace
+    return text
+
 
 router = APIRouter(
     prefix="/classes/{class_id}/assignments/{assignment_id}/ripple",
@@ -90,7 +110,8 @@ async def import_ripple_csv(
         for row in rows:
             topics = row.get("Topics") or ""
             status = row.get("Resource Status") or ""
-            sections = [row[col] for col in section_cols if (row.get(col) or "").strip()]
+            sections = [_clean_section(row[col]) for col in section_cols if (row.get(col) or "").strip()]
+            sections = [s for s in sections if s]  # drop any that become empty after cleaning
             resource_id = row.get("Resource ID") or ""
 
             # Skip multi-topic rows
@@ -128,6 +149,7 @@ async def import_ripple_csv(
                     resource_status=status,
                     topics=topics,
                     sections=sections,
+                    timestamp=(row.get("Timestamp") or "").strip() or None,
                 )
             )
         db.add_all(records)
@@ -150,7 +172,7 @@ async def import_ripple_csv(
         for row in rows:
             topic_ids = row.get("Topic IDs") or ""
             role = row.get("Role") or ""
-            comment = (row.get("Comment") or "").strip()
+            comment = _clean_section(row.get("Comment") or "")
             resource_id = row.get("Resource ID") or ""
             user_id = row.get("User Course ID") or row.get("User ID") or ""
 
@@ -190,6 +212,7 @@ async def import_ripple_csv(
                     role=role,
                     comment=comment,
                     rubric_scores=rubric_scores,
+                    created_at=(row.get("Created At") or "").strip() or None,
                 )
             )
         db.add_all(records)
@@ -207,6 +230,9 @@ def clear_ripple_data(
     """Delete all imported resource and moderation rows for this assignment."""
     _require_class_teacher(class_id, current_user, db)
     assignment = _get_assignment_or_404(class_id, assignment_id, db)
+    # Delete grade results and any grading job first (they reference ripple rows)
+    db.query(GradeResult).filter(GradeResult.assignment_id == assignment.id).delete()
+    db.query(GradingJob).filter(GradingJob.assignment_id == assignment.id).delete()
     db.query(RippleResource).filter(RippleResource.assignment_id == assignment.id).delete()
     db.query(RippleModeration).filter(RippleModeration.assignment_id == assignment.id).delete()
     db.commit()

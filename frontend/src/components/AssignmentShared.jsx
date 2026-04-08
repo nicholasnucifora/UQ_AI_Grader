@@ -3,6 +3,29 @@
  * and AssignmentEditPage (edit). Editing this file affects both pages.
  */
 import { useState, useEffect, useRef } from 'react'
+
+function fmtDate(raw) {
+  if (!raw) return null
+  let d
+  const iso = new Date(raw)
+  if (!isNaN(iso)) {
+    d = iso
+  } else {
+    const m = raw.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})(?:\s+(\d{1,2}):(\d{2}))?/)
+    if (!m) return raw
+    const [, dd, mm, yyyy, hh = '0', min = '0'] = m
+    d = new Date(+yyyy, +mm - 1, +dd, +hh, +min)
+    if (isNaN(d)) return raw
+  }
+  const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December']
+  const day = d.getDate()
+  const suffix = (day % 100 >= 11 && day % 100 <= 13) ? 'th' : ['th','st','nd','rd'][Math.min(day % 10, 3)]
+  const h = d.getHours()
+  const min = d.getMinutes().toString().padStart(2, '0')
+  const ampm = h >= 12 ? 'pm' : 'am'
+  const h12 = h % 12 || 12
+  return `${MONTHS[d.getMonth()]} ${day}${suffix}, ${h12}:${min} ${ampm}`
+}
 import RubricIngestUploader from './RubricIngestUploader'
 import RubricEditor from './RubricEditor'
 import { api } from '../api/client'
@@ -253,7 +276,7 @@ export function CombineTypeSection({ label, enabled, onToggle, maxN, onMaxN }) {
   )
 }
 
-export function RubricBlock({ rubric, setRubric }) {
+export function RubricBlock({ rubric, setRubric, hasGrades = false }) {
   return (
     <div className="space-y-3">
       {!rubric ? (
@@ -273,7 +296,7 @@ export function RubricBlock({ rubric, setRubric }) {
           </button>
         </>
       ) : (
-        <RubricEditor rubric={rubric} onChange={setRubric} onDelete={() => setRubric(null)} />
+        <RubricEditor rubric={rubric} onChange={setRubric} hasGrades={hasGrades} onDelete={() => setRubric(null)} />
       )}
     </div>
   )
@@ -284,7 +307,7 @@ export function RubricBlock({ rubric, setRubric }) {
  * Only used on the edit page (assignment must already exist with an ID).
  * Shows when use_topic_attachments is enabled and topics have been imported.
  */
-export function TopicAttachmentManager({ classId, assignmentId, globalInstruction, overrides, onOverrideChange, onAttachmentsChange }) {
+export function TopicAttachmentManager({ classId, assignmentId, globalInstruction, overrides, onOverrideChange, onAttachmentsChange, cutoffDates, onCutoffChange, showAttachments = true }) {
   const [topics, setTopics] = useState([])
   const [attachmentsByTopic, setAttachmentsByTopic] = useState({})
   const [expanded, setExpanded] = useState(null)
@@ -378,6 +401,8 @@ export function TopicAttachmentManager({ classId, assignmentId, globalInstructio
           globalInstruction={globalInstruction}
           classId={classId}
           assignmentId={assignmentId}
+          cutoffDate={(cutoffDates || {})[topic] || ''}
+          showAttachments={showAttachments}
           onToggle={() => toggleExpand(topic)}
           onOverrideChange={(val) => {
             if (val) {
@@ -388,6 +413,15 @@ export function TopicAttachmentManager({ classId, assignmentId, globalInstructio
               onOverrideChange(next)
             }
           }}
+          onCutoffChange={(val) => {
+            const next = { ...(cutoffDates || {}) }
+            if (val) {
+              next[topic] = val
+            } else {
+              delete next[topic]
+            }
+            onCutoffChange?.(next)
+          }}
           onUpload={(file) => handleUpload(topic, file)}
           onDelete={(id) => handleDelete(topic, id)}
         />
@@ -396,10 +430,117 @@ export function TopicAttachmentManager({ classId, assignmentId, globalInstructio
   )
 }
 
+/** Converts DD-MM-YYYY or DD-MM-YYYY HH:MM to { date: 'YYYY-MM-DD', hour: '1'-'12', minute: '00'-'59', period: 'AM'|'PM', hasTime: bool } */
+function parseCutoffValue(val) {
+  if (!val) return { date: '', hour: '11', minute: '59', period: 'PM', hasTime: false }
+  const m = val.match(/^(\d{1,2})-(\d{2})-(\d{4})(?:\s+(\d{1,2}):(\d{2}))?$/)
+  if (!m) return { date: '', hour: '11', minute: '59', period: 'PM', hasTime: false }
+  const day = m[1].padStart(2, '0'), month = m[2], year = m[3]
+  const date = `${year}-${month}-${day}`
+  if (m[4] != null) {
+    let h = parseInt(m[4], 10)
+    const min = m[5]
+    const period = h >= 12 ? 'PM' : 'AM'
+    if (h === 0) h = 12
+    else if (h > 12) h -= 12
+    return { date, hour: String(h), minute: min, period, hasTime: true }
+  }
+  return { date, hour: '11', minute: '59', period: 'PM', hasTime: false }
+}
+
+/** Converts { date, hour, minute, period, hasTime } back to DD-MM-YYYY HH:MM */
+function formatCutoffValue({ date, hour, minute, period, hasTime }) {
+  if (!date) return ''
+  const [y, m, d] = date.split('-')
+  const base = `${parseInt(d, 10)}-${m}-${y}`
+  if (!hasTime) return base
+  let h = parseInt(hour, 10)
+  if (period === 'AM' && h === 12) h = 0
+  else if (period === 'PM' && h !== 12) h += 12
+  return `${base} ${String(h).padStart(2, '0')}:${minute}`
+}
+
+function CutoffDatePicker({ value, onChange }) {
+  const parsed = parseCutoffValue(value)
+  const { date, hour, minute, period, hasTime } = parsed
+
+  const update = (overrides) => {
+    const next = { ...parsed, ...overrides }
+    onChange(formatCutoffValue(next))
+  }
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-2">
+        <input
+          type="date"
+          className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+          value={date}
+          onChange={(e) => update({ date: e.target.value })}
+        />
+        {date && (
+          <button
+            type="button"
+            onClick={() => onChange('')}
+            className="text-xs text-red-400 hover:text-red-600"
+          >
+            Clear
+          </button>
+        )}
+      </div>
+      {date && (
+        <div className="flex items-center gap-2">
+          <label className="flex items-center gap-1.5 text-xs text-gray-500">
+            <input
+              type="checkbox"
+              checked={hasTime}
+              onChange={(e) => update({ hasTime: e.target.checked })}
+              className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+            />
+            Set specific time
+          </label>
+          {hasTime && (
+            <div className="flex items-center gap-1">
+              <select
+                value={hour}
+                onChange={(e) => update({ hour: e.target.value })}
+                className="border border-gray-300 rounded px-1.5 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              >
+                {Array.from({ length: 12 }, (_, i) => i + 1).map(h => (
+                  <option key={h} value={String(h)}>{h}</option>
+                ))}
+              </select>
+              <span className="text-gray-400">:</span>
+              <select
+                value={minute}
+                onChange={(e) => update({ minute: e.target.value })}
+                className="border border-gray-300 rounded px-1.5 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              >
+                {Array.from({ length: 60 }, (_, i) => String(i).padStart(2, '0')).map(m => (
+                  <option key={m} value={m}>{m}</option>
+                ))}
+              </select>
+              <select
+                value={period}
+                onChange={(e) => update({ period: e.target.value })}
+                className="border border-gray-300 rounded px-1.5 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              >
+                <option value="AM">AM</option>
+                <option value="PM">PM</option>
+              </select>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function TopicRow({
   topic, resourceCount, isOpen, atts, overridden,
   overrideValue, globalInstruction, classId, assignmentId,
-  onToggle, onOverrideChange, onUpload, onDelete,
+  cutoffDate, showAttachments,
+  onToggle, onOverrideChange, onCutoffChange, onUpload, onDelete,
 }) {
   const { abortUpload } = useUpload()
   const pendingUploads = useTopicUploads(classId, assignmentId, topic)
@@ -419,6 +560,11 @@ function TopicRow({
               {atts.length} file{atts.length !== 1 ? 's' : ''}
             </span>
           )}
+          {cutoffDate && (
+            <span className="text-xs bg-orange-50 text-orange-600 px-1.5 py-0.5 rounded-full">
+              cutoff {fmtDate(cutoffDate)}
+            </span>
+          )}
           {overridden && (
             <span className="text-xs bg-amber-50 text-amber-600 px-1.5 py-0.5 rounded-full">custom instructions</span>
           )}
@@ -428,7 +574,15 @@ function TopicRow({
 
       {isOpen && (
         <div className="border-t border-gray-100 px-4 py-3 space-y-4 bg-gray-50/40">
+          {/* Cutoff date */}
+          <div>
+            <span className="block text-xs font-medium text-gray-600 mb-0.5">Last submitted date</span>
+            <p className="text-xs text-gray-400 mb-1.5">Submissions after this date will be excluded from AI grading. Leave empty for no cutoff.</p>
+            <CutoffDatePicker value={cutoffDate} onChange={onCutoffChange} />
+          </div>
+
           {/* Per-topic instruction override */}
+          {showAttachments && <>
           <div>
             <span className="block text-xs font-medium text-gray-600 mb-0.5">Topic-specific attachment instructions</span>
             <p className="text-xs text-gray-400 mb-1.5">Explain what the separate files for this topic represent and any specific instructions for the AI — e.g. lecture slides, case studies, or reference materials relevant to this topic only.</p>
@@ -497,6 +651,7 @@ function TopicRow({
               />
             </label>
           </div>
+          </>}
         </div>
       )}
     </div>

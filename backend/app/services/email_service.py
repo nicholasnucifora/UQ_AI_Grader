@@ -356,6 +356,20 @@ def _topic_combined_grade_str(
     return f"{total_val:.2f} / {total_max:.2f}"
 
 
+def _fmt_lateness_email(seconds: int | None) -> str:
+    """Return a human-readable lateness string for email, e.g. '2 days after the deadline'."""
+    if not seconds:
+        return "after the deadline"
+    days = seconds // 86400
+    if days > 0:
+        return f"{days} day{'s' if days != 1 else ''} after the deadline"
+    hours = seconds // 3600
+    if hours > 0:
+        return f"{hours} hour{'s' if hours != 1 else ''} after the deadline"
+    minutes = max(1, seconds // 60)
+    return f"{minutes} minute{'s' if minutes != 1 else ''} after the deadline"
+
+
 def build_student_summary_text(
     assignment_name: str,
     student_name: str,
@@ -366,6 +380,7 @@ def build_student_summary_text(
     combine_resource_max_n: int | None = None,
     combine_moderation_grades: bool = False,
     combine_moderation_max_n: int | None = None,
+    dismissed_late_items: list | None = None,
 ) -> str:
     """Build a combined plain-text email for all of a student's grade results.
 
@@ -438,6 +453,27 @@ def build_student_summary_text(
                 combine_moderation_grades, combine_moderation_max_n, mod_scale,
             ))
             lines.append("")
+
+    # ── Dismissed late submissions notice ─────────────────────────────────
+    if dismissed_late_items:
+        lines.extend(["", thin_sep, "NOTE — LATE SUBMISSION(S) NOT GRADED", thin_sep, ""])
+        lines.append(
+            "Your instructor reviewed the following submission(s) and determined they were"
+        )
+        lines.append(
+            "received after the deadline. No extension was granted, so they have not been graded."
+        )
+        lines.append("")
+        for item in dismissed_late_items:
+            type_label = "Moderation" if item["result_type"] == "moderation" else "Resource"
+            late_str = _fmt_lateness_email(item.get("seconds_late"))
+            topic_label = item.get("topic", "")
+            label = f"  {type_label} {item['resource_id']}"
+            if topic_label and topic_label != "No Topic":
+                label += f" (Topic: {topic_label})"
+            label += f" \u2014 received {late_str}"
+            lines.append(label)
+        lines.append("")
 
     # ── Separator before detailed AI feedback ─────────────────────────────
     lines.extend([

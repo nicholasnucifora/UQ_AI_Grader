@@ -46,7 +46,7 @@ export default function TopicPage() {
 
   function handleGradeNow(result) {
     setActiveTab('teacher')
-    setStartAtResultId(result.id)
+    setStartAtResultId({ id: result.id, nonce: Date.now() })
   }
   const [teacherResQueue, setTeacherResQueue] = useState([])
   const [teacherModQueue, setTeacherModQueue] = useState([])
@@ -73,7 +73,7 @@ export default function TopicPage() {
 
   // Filter results to this topic and build queues when results load
   const topicResults = (allResults ?? []).filter(
-    (r) => r.status === 'complete' && (r.resource_topics ?? '').trim() === topic
+    (r) => (r.status === 'complete' || r.status === 'error') && (r.resource_topics ?? '').trim() === topic
   )
   const resourceResults = topicResults.filter((r) => r.result_type === 'resource')
   const moderationResults = topicResults.filter((r) => r.result_type === 'moderation')

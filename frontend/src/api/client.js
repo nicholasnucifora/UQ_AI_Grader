@@ -118,6 +118,11 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify(body),
     }),
+  redoAiGrade: (classId, assignmentId, resultId, body) =>
+    request(`/classes/${classId}/assignments/${assignmentId}/grade/results/${resultId}/redo`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
   openGradeEmail: async (classId, assignmentId, resultId, toEmail) => {
     const qs = toEmail ? `?to_email=${encodeURIComponent(toEmail)}` : ''
     const { to, subject, body } = await request(
@@ -162,5 +167,26 @@ export const api = {
   deleteTopicAttachment: (classId, assignmentId, topic, attachmentId) =>
     request(`/classes/${classId}/assignments/${assignmentId}/topics/${encodeURIComponent(topic)}/attachments/${attachmentId}`, {
       method: 'DELETE',
+    }),
+  setTopicCutoff: (classId, assignmentId, topic, cutoffDate) =>
+    request(`/classes/${classId}/assignments/${assignmentId}/topics/${encodeURIComponent(topic)}/cutoff`, {
+      method: 'PUT',
+      body: JSON.stringify({ cutoff_date: cutoffDate || null }),
+    }),
+  grantExtension: (classId, assignmentId, itemType, itemId) =>
+    request(`/classes/${classId}/assignments/${assignmentId}/extensions/${itemType}/${itemId}`, {
+      method: 'POST',
+    }),
+  revokeExtension: (classId, assignmentId, itemType, itemId) =>
+    request(`/classes/${classId}/assignments/${assignmentId}/revoke-extension/${itemType}/${itemId}`, {
+      method: 'POST',
+    }),
+  acknowledgeLate: (classId, assignmentId, resultId) =>
+    request(`/classes/${classId}/assignments/${assignmentId}/acknowledge-late/${resultId}`, {
+      method: 'POST',
+    }),
+  undoAcknowledgeLate: (classId, assignmentId, resultId) =>
+    request(`/classes/${classId}/assignments/${assignmentId}/undo-acknowledge-late/${resultId}`, {
+      method: 'POST',
     }),
 }
