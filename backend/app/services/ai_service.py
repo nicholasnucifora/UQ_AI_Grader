@@ -269,6 +269,8 @@ class AIService:
         context: dict | None = None,
         model: str | None = None,
         feedback_format: str = "",
+        topic_attachments: list[dict] | None = None,
+        topic_attachment_instructions: str = "",
     ) -> dict:
         """
         Grade a moderation comment against the rubric.
@@ -314,6 +316,9 @@ class AIService:
 
         rubric_md = self.format_rubric_to_markdown(rubric)
         context_section = self._build_context_section(context)
+        attachments_section = self._build_topic_attachments_section(
+            topic_attachments, topic_attachment_instructions
+        )
 
         original_block = "\n\n".join(
             f"### Section {i + 1}\n{s}" for i, s in enumerate(original_sections)
@@ -329,6 +334,7 @@ class AIService:
             "The original submission is provided only as context so you can judge the quality of the moderation.\n\n"
             f"Feedback format: {feedback_instruction}\n\n"
             f"{context_section}"
+            f"{attachments_section}"
             f"{rubric_md}"
         )
 

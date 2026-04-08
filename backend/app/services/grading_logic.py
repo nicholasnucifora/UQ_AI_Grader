@@ -426,6 +426,25 @@ def grade_assignment(assignment_id: int, db: Session) -> None:
         mod_id_val = moderation.id
         mod_user_id = moderation.user_id
 
+        # Load topic attachments for the moderation's topic (from the original resource)
+        mod_topic_attachments = None
+        if use_topic_attachments and original_resource is not None:
+            mod_topic = (original_resource.topics or "").strip()
+            if mod_topic:
+                rows = (
+                    db.query(TopicAttachment)
+                    .filter(
+                        TopicAttachment.assignment_id == assignment_id,
+                        TopicAttachment.topic == mod_topic,
+                    )
+                    .all()
+                )
+                mod_topic_attachments = [
+                    {"filename": a.filename, "content_text": a.content_text}
+                    for a in rows
+                    if a.content_text.strip()
+                ]
+
         db.commit()
 
         try:
@@ -439,6 +458,8 @@ def grade_assignment(assignment_id: int, db: Session) -> None:
                 },
                 model=ai_model,
                 feedback_format=feedback_format,
+                topic_attachments=mod_topic_attachments,
+                topic_attachment_instructions=topic_attachment_instructions,
             )
             _upsert_grade_result(
                 db,
@@ -544,6 +565,8 @@ def grade_preview_extension(assignment_id: int, db: Session, max_total: int = 15
             context=context,
             ai_model=ai_model,
             feedback_format=feedback_format,
+            use_topic_attachments=use_topic_attachments,
+            topic_attachment_instructions=topic_attachment_instructions,
             max_total=max_total,
         )
         return
@@ -688,6 +711,8 @@ def _extend_moderation_preview(
     context: dict,
     ai_model: str | None,
     feedback_format: str,
+    use_topic_attachments: bool = False,
+    topic_attachment_instructions: str = "",
     max_total: int = 15,
 ) -> None:
     """Internal helper: extend a moderation preview."""
@@ -782,6 +807,24 @@ def _extend_moderation_preview(
             "additional_notes": assignment.moderation_additional_notes or context["additional_notes"],
         }
 
+        mod_topic_attachments = None
+        if use_topic_attachments and original_resource is not None:
+            mod_topic = (original_resource.topics or "").strip()
+            if mod_topic:
+                rows = (
+                    db.query(TopicAttachment)
+                    .filter(
+                        TopicAttachment.assignment_id == assignment_id,
+                        TopicAttachment.topic == mod_topic,
+                    )
+                    .all()
+                )
+                mod_topic_attachments = [
+                    {"filename": a.filename, "content_text": a.content_text}
+                    for a in rows
+                    if a.content_text.strip()
+                ]
+
         db.commit()
 
         try:
@@ -792,6 +835,8 @@ def _extend_moderation_preview(
                 context=mod_context,
                 model=ai_model,
                 feedback_format=feedback_format,
+                topic_attachments=mod_topic_attachments,
+                topic_attachment_instructions=topic_attachment_instructions,
             )
             _upsert_grade_result(
                 db,

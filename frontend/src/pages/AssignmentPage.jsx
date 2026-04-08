@@ -319,17 +319,23 @@ export default function AssignmentPage() {
           const resTeacher = computeStudentCombined(res, assignment?.combine_resource_max_n ?? null, maxPossibleResource, assignment, true, 'resource')
           const modAi = isRnM ? computeStudentCombined(mods, assignment?.combine_moderation_max_n ?? null, maxPossibleModeration, assignment, false, 'moderation') : null
           const modTeacher = isRnM ? computeStudentCombined(mods, assignment?.combine_moderation_max_n ?? null, maxPossibleModeration, assignment, true, 'moderation') : null
-          const row = [s.name || s.id || '', s.id || '', topic, resAi?.grade ?? '']
-          if (isRnM) row.push(modAi?.grade ?? '')
-          row.push(resTeacher?.grade ?? '')
-          if (isRnM) row.push(modTeacher?.grade ?? '')
+          const resAiGrade = resAi?.grade ?? null
+          const resTeacherGrade = resTeacher?.grade ?? null
+          const modAiGrade = modAi?.grade ?? null
+          const modTeacherGrade = modTeacher?.grade ?? null
+          const overallAiGrade = resAiGrade !== null || modAiGrade !== null ? (resAiGrade ?? 0) + (modAiGrade ?? 0) : null
+          const overallTeacherGrade = resTeacherGrade !== null || modTeacherGrade !== null ? (resTeacherGrade ?? 0) + (modTeacherGrade ?? 0) : null
+          const row = [s.name || s.id || '', s.id || '', topic, overallAiGrade !== null ? overallAiGrade : '', resAiGrade !== null ? resAiGrade : '']
+          if (isRnM) row.push(modAiGrade !== null ? modAiGrade : '')
+          row.push(overallTeacherGrade !== null ? overallTeacherGrade : '', resTeacherGrade !== null ? resTeacherGrade : '')
+          if (isRnM) row.push(modTeacherGrade !== null ? modTeacherGrade : '')
           dataRows.push(row)
         }
       }
 
-      headers = ['Student Name', 'Student ID', 'Topic', 'Resource AI Grade']
+      headers = ['Student Name', 'Student ID', 'Topic', 'Overall AI Grade', 'Resource AI Grade']
       if (isRnM) headers.push('Moderation AI Grade')
-      headers.push('Resource Teacher Grade')
+      headers.push('Overall Teacher Grade', 'Resource Teacher Grade')
       if (isRnM) headers.push('Moderation Teacher Grade')
       csvRows = [headers, ...dataRows]
 
@@ -341,9 +347,12 @@ export default function AssignmentPage() {
         const modAi = isRnM ? computeStudentCombined(s.moderations, assignment?.combine_moderation_max_n ?? null, maxPossibleModeration, assignment, false, 'moderation') : null
         const modTeacher = isRnM ? computeStudentCombined(s.moderations, assignment?.combine_moderation_max_n ?? null, maxPossibleModeration, assignment, true, 'moderation') : null
         const resAiGrade = resAi?.grade ?? null
+        const resTeacherGrade = resTeacher?.grade ?? null
         const modAiGrade = modAi?.grade ?? null
+        const modTeacherGrade = modTeacher?.grade ?? null
         const overallAiGrade = resAiGrade !== null || modAiGrade !== null ? (resAiGrade ?? 0) + (modAiGrade ?? 0) : null
-        return { ...s, resAiGrade, resTeacherGrade: resTeacher?.grade ?? null, modAiGrade, modTeacherGrade: modTeacher?.grade ?? null, overallAiGrade }
+        const overallTeacherGrade = resTeacherGrade !== null || modTeacherGrade !== null ? (resTeacherGrade ?? 0) + (modTeacherGrade ?? 0) : null
+        return { ...s, resAiGrade, resTeacherGrade, modAiGrade, modTeacherGrade, overallAiGrade, overallTeacherGrade }
       })
       switch (exportSortOrder) {
         case 'surname_asc': rows.sort((a, b) => getSurname(a.name).localeCompare(getSurname(b.name))); break
@@ -354,12 +363,12 @@ export default function AssignmentPage() {
       }
       headers = ['Student Name', 'Student ID', 'Overall AI Grade', 'Resource AI Grade']
       if (isRnM) headers.push('Moderation AI Grade')
-      headers.push('Resource Teacher Grade')
+      headers.push('Overall Teacher Grade', 'Resource Teacher Grade')
       if (isRnM) headers.push('Moderation Teacher Grade')
       csvRows = [headers, ...rows.map((s) => {
         const row = [s.name || s.id || '', s.id || '', s.overallAiGrade !== null ? s.overallAiGrade : '', s.resAiGrade !== null ? s.resAiGrade : '']
         if (isRnM) row.push(s.modAiGrade !== null ? s.modAiGrade : '')
-        row.push(s.resTeacherGrade !== null ? s.resTeacherGrade : '')
+        row.push(s.overallTeacherGrade !== null ? s.overallTeacherGrade : '', s.resTeacherGrade !== null ? s.resTeacherGrade : '')
         if (isRnM) row.push(s.modTeacherGrade !== null ? s.modTeacherGrade : '')
         return row
       })]
