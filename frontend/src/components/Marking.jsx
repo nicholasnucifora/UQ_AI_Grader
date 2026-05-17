@@ -1385,10 +1385,130 @@ export function GradeResultsTable({ results, type, expandedResult, setExpandedRe
 }
 
 // ---------------------------------------------------------------------------
+// Grade calculation breakdown — shows per-criterion points and scaling math
+// ---------------------------------------------------------------------------
+
+function GradeCalculation({ rubric, aiGrades, selectedLevels, storedRubricMax, assignment, resultType }) {
+  const effectiveAssignment = getEffectiveAssignment(assignment, resultType)
+  const isScaling = effectiveAssignment?.grade_scale_enabled && effectiveAssignment?.grade_scale_max
+  const scaleMax = effectiveAssignment?.grade_scale_max
+  const rounding = effectiveAssignment?.grade_rounding ?? 'none'
+  const dp = effectiveAssignment?.grade_decimal_places ?? 2
+
+  function roundingLabel() {
+    switch (rounding) {
+      case 'round': return 'rounded'
+      case 'round_up': return 'rounded up'
+      case 'round_down': return 'rounded down'
+      case 'half': return 'nearest ½'
+      default: return `${dp} d.p.`
+    }
+  }
+
+  const rubricCurrentMax = (rubric?.criteria ?? []).reduce((s, c) => {
+    const pts = (c.levels ?? []).map((l) => l.points)
+    return s + (pts.length > 0 ? Math.max(...pts) : 0)
+  }, 0)
+  const levelPointsLookup = {}
+  ;(rubric?.criteria ?? []).forEach((c) => {
+    ;(c.levels ?? []).forEach((l) => { levelPointsLookup[l.id] = l.points })
+  })
+
+  const aiGradeList = aiGrades ?? []
+  const hasAiGrades = aiGradeList.length > 0
+  const aiRaw = aiGradeList.reduce((s, g) => s + (g.points_awarded || 0), 0)
+  const aiStoredMax = storedRubricMax
+    ? Object.values(storedRubricMax).reduce((s, v) => s + v, 0) || rubricCurrentMax
+    : rubricCurrentMax
+  const aiPreRound = isScaling && aiStoredMax > 0 ? (aiRaw / aiStoredMax) * scaleMax : null
+  const aiScaled = isScaling ? applyScaling(aiRaw, aiStoredMax, effectiveAssignment) : null
+
+  const hasSelections = Object.keys(selectedLevels ?? {}).length > 0
+  const teacherRaw = (rubric?.criteria ?? []).reduce((s, c) => {
+    const lid = selectedLevels?.[c.id]
+    return s + (lid ? (levelPointsLookup[lid] ?? 0) : 0)
+  }, 0)
+  const teacherPreRound = isScaling && rubricCurrentMax > 0 && hasSelections
+    ? (teacherRaw / rubricCurrentMax) * scaleMax
+    : null
+  const teacherScaled = isScaling && hasSelections
+    ? applyScaling(teacherRaw, rubricCurrentMax, effectiveAssignment)
+    : null
+
+  if (!hasAiGrades && !hasSelections) return null
+
+  const fmtScaled = (val) => val !== null ? val.toFixed(rounding === 'half' ? 1 : dp) : '?'
+  const twoCol = hasAiGrades && hasSelections
+
+  return (
+    <div className="mb-5 border border-gray-200 rounded-lg overflow-hidden text-xs">
+      <div className="bg-gray-50 px-3 py-2 border-b border-gray-200 text-[10px] font-semibold text-gray-500 uppercase tracking-wide">
+        Grade Calculation
+      </div>
+      <div className={twoCol ? 'grid grid-cols-2 divide-x divide-gray-200' : ''}>
+        {hasAiGrades && (
+          <div className="p-3 space-y-1">
+            {twoCol && <p className="text-[10px] font-semibold text-emerald-700 uppercase tracking-wide mb-2">AI Grade</p>}
+            {aiGradeList.map((g) => (
+              <div key={g.criterion_id ?? g.criterion_name} className="flex justify-between gap-3">
+                <span className="text-gray-500 truncate">{g.criterion_name ?? g.criterion_id}</span>
+                <span className="whitespace-nowrap text-gray-700">{g.level_title ?? '?'}: <strong>{g.points_awarded ?? 0}</strong> pts</span>
+              </div>
+            ))}
+            <div className="border-t border-gray-100 pt-1 mt-1 flex justify-between font-semibold">
+              <span className="text-gray-500">Raw</span>
+              <span className={aiRaw > aiStoredMax ? 'text-red-600' : 'text-gray-800'}>
+                {aiRaw} / {aiStoredMax} pts{aiRaw > aiStoredMax ? ' ⚠' : ''}
+              </span>
+            </div>
+            {isScaling && aiStoredMax > 0 && (
+              <div className="text-gray-400 mt-0.5 leading-relaxed">
+                ({aiRaw} ÷ {aiStoredMax}) × {scaleMax} = {aiPreRound?.toFixed(3)} → {roundingLabel()} → <strong className="text-gray-700">{fmtScaled(aiScaled)} / {scaleMax}</strong>
+              </div>
+            )}
+            {aiRaw > aiStoredMax && (
+              <p className="text-red-500 mt-1">Raw score exceeds rubric max — this result was graded with incorrect data. Redo the AI grade to fix it.</p>
+            )}
+          </div>
+        )}
+        {hasSelections && (
+          <div className="p-3 space-y-1">
+            {twoCol && <p className="text-[10px] font-semibold text-indigo-700 uppercase tracking-wide mb-2">Your Grade</p>}
+            {(rubric?.criteria ?? []).map((c) => {
+              const lid = selectedLevels?.[c.id]
+              const level = lid ? c.levels.find((l) => l.id === lid) : null
+              return (
+                <div key={c.id} className="flex justify-between gap-3">
+                  <span className="text-gray-500 truncate">{c.name}</span>
+                  <span className="whitespace-nowrap text-gray-700">
+                    {level
+                      ? <>{level.title}: <strong>{level.points}</strong> pts</>
+                      : <span className="text-gray-300">—</span>}
+                  </span>
+                </div>
+              )
+            })}
+            <div className="border-t border-gray-100 pt-1 mt-1 flex justify-between font-semibold">
+              <span className="text-gray-500">Raw</span>
+              <span className="text-gray-800">{teacherRaw} / {rubricCurrentMax} pts</span>
+            </div>
+            {isScaling && rubricCurrentMax > 0 && (
+              <div className="text-gray-400 mt-0.5 leading-relaxed">
+                ({teacherRaw} ÷ {rubricCurrentMax}) × {scaleMax} = {teacherPreRound?.toFixed(3)} → {roundingLabel()} → <strong className="text-gray-700">{fmtScaled(teacherScaled)} / {scaleMax}</strong>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Teacher grading panel — resources and moderations, one at a time
 // ---------------------------------------------------------------------------
 
-export function TeacherGradingPanel({ resourceQueue, moderationQueue, resourceRubric, moderationRubric, onSave, onRedoGrade, isRnM, startAtResultId }) {
+export function TeacherGradingPanel({ resourceQueue, moderationQueue, resourceRubric, moderationRubric, onSave, onRedoGrade, isRnM, startAtResultId, assignment }) {
   const [activeType, setActiveType] = useState('resource')
   const [resourceIdx, setResourceIdx] = useState(() =>
     Math.max(0, resourceQueue.findIndex((r) => !r.teacher_graded_at))
@@ -1813,6 +1933,15 @@ export function TeacherGradingPanel({ resourceQueue, moderationQueue, resourceRu
           ) : (
             <p className="text-sm text-amber-600 mb-5">No rubric defined — save the rubric in assignment settings first.</p>
           )}
+
+          <GradeCalculation
+            rubric={rubric}
+            aiGrades={current?.criterion_grades}
+            selectedLevels={selectedLevels}
+            storedRubricMax={current?.rubric_max_points_json}
+            assignment={assignment}
+            resultType={current?.result_type}
+          />
 
           <div className="flex items-center gap-3">
             <button

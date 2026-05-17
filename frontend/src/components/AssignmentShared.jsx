@@ -31,6 +31,20 @@ import RubricEditor from './RubricEditor'
 import { api } from '../api/client'
 import { useUpload, useTopicUploads } from '../contexts/UploadContext'
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+export function cloneRubric(r) {
+  if (!r) return null
+  return {
+    ...r,
+    criteria: r.criteria.map((c) => ({
+      ...c,
+      id: crypto.randomUUID(),
+      levels: c.levels.map((l) => ({ ...l, id: crypto.randomUUID() })),
+    })),
+  }
+}
+
 // ── Constants ────────────────────────────────────────────────────────────────
 
 export const MARKING_MODES = [

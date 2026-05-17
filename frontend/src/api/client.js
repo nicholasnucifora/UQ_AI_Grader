@@ -105,8 +105,10 @@ export const api = {
     request(`/classes/${classId}/assignments/${assignmentId}/grade/cancel`, { method: 'POST' }),
   deleteGrading: (classId, assignmentId) =>
     request(`/classes/${classId}/assignments/${assignmentId}/grade`, { method: 'DELETE' }),
-  clearAiGrades: (classId, assignmentId) =>
-    request(`/classes/${classId}/assignments/${assignmentId}/grade/ai-grades`, { method: 'DELETE' }),
+  clearAiGrades: (classId, assignmentId, topics) => {
+    const qs = topics && topics.size > 0 ? `?topics=${encodeURIComponent([...topics].join(','))}` : ''
+    return request(`/classes/${classId}/assignments/${assignmentId}/grade/ai-grades${qs}`, { method: 'DELETE' })
+  },
   getGradeStatus: (classId, assignmentId) =>
     request(`/classes/${classId}/assignments/${assignmentId}/grade/status`),
   getGradeResults: (classId, assignmentId) =>

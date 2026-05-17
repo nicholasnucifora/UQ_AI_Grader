@@ -53,6 +53,75 @@ def format_ai_error(exc: Exception) -> str:
     return f"AI grading encountered an unexpected error: {exc}"
 
 
+def _fix_criterion_grades(
+    grades: list[dict],
+    valid_level_pts: dict[str, float],
+    valid_criterion_ids: set[str] | None = None,
+) -> tuple[list[dict], bool]:
+    """
+    Validate and fix criterion grades returned by the AI.
+
+    - If any item is not a dict, returns (grades, False) — caller should retry.
+    - If valid_criterion_ids provided: validates that the returned set matches exactly
+      (correct count, no unknown IDs, no duplicates).  A student who organises their
+      submission with per-criterion sub-sections (e.g. "Clarity — Resource" / "Clarity —
+      Moderations") can cause the AI to emit one entry per sub-section instead of one per
+      rubric criterion; this check catches and retries that case.
+    - If level_id is not in the rubric, returns (grades, False) — caller should retry.
+    - If points_awarded doesn't match the level's correct points, snaps it to the correct value.
+
+    Returns (fixed_grades, all_valid).
+    """
+    # All items must be dicts
+    for g in grades:
+        if not isinstance(g, dict):
+            logger.warning(
+                "AI returned a non-dict item in criterion_grades (type=%s); will retry grading.",
+                type(g).__name__,
+            )
+            return grades, False
+
+    # Criterion-level structural validation
+    if valid_criterion_ids is not None:
+        returned_cids = [g.get("criterion_id", "") for g in grades]
+        if len(grades) != len(valid_criterion_ids):
+            logger.warning(
+                "AI returned %d criterion grades but rubric expects %d; will retry grading.",
+                len(grades), len(valid_criterion_ids),
+            )
+            return grades, False
+        for cid in returned_cids:
+            if cid not in valid_criterion_ids:
+                logger.warning(
+                    "AI returned unknown criterion_id '%s' not in rubric; will retry grading.", cid
+                )
+                return grades, False
+        if len(set(returned_cids)) != len(returned_cids):
+            logger.warning("AI returned duplicate criterion_ids; will retry grading.")
+            return grades, False
+
+    if not valid_level_pts:
+        return grades, True
+
+    fixed = []
+    for g in grades:
+        lid = g.get("level_id", "")
+        if lid not in valid_level_pts:
+            logger.warning(
+                "AI returned level_id '%s' not found in rubric; will retry grading.", lid
+            )
+            return grades, False
+        correct_pts = valid_level_pts[lid]
+        if g.get("points_awarded") != correct_pts:
+            logger.warning(
+                "AI returned points_awarded=%s for level_id '%s' (expected=%s); snapping.",
+                g.get("points_awarded"), lid, correct_pts,
+            )
+            g = {**g, "points_awarded": correct_pts}
+        fixed.append(g)
+    return fixed, True
+
+
 class AIService:
     """Wraps the Anthropic client. All AI grading logic lives here."""
 
@@ -108,7 +177,20 @@ class AIService:
         """Build a section for topic-specific reference attachments."""
         if not topic_attachments:
             return ""
-        header = "## Topic Reference Materials\n\n"
+        # The disclaimer is critical: topic attachment text (e.g. debate transcripts, slide decks)
+        # often contains internal section headings (e.g. "Resources (Sections 1 & 2)",
+        # "Moderations (Sections 3, 4 & 5)") that look like rubric categories. Without this
+        # warning the AI combines those headings with rubric criterion names and returns extra
+        # criterion_grades entries — one per attachment section instead of one per rubric criterion.
+        header = (
+            "## Topic Reference Materials\n\n"
+            "These materials provide background context on the debate topic only. "
+            "Use them solely to better understand the subject matter of the student's submission. "
+            "Do NOT treat any headings, section labels, or categories within these materials "
+            "as rubric criteria — the only valid criteria are those defined in the Rubric section below. "
+            "Grade the student submission with exactly one criterion_grades entry per rubric criterion, "
+            "regardless of how many sections, teams, or topics appear in the reference materials.\n\n"
+        )
         if instructions:
             header += f"{instructions}\n\n"
         parts = []
@@ -203,10 +285,30 @@ class AIService:
             f"### Section {i + 1}\n{s}" for i, s in enumerate(sections)
         )
 
+        # Build validation lookups
+        criteria = rubric.get("criteria", [])
+        n_criteria = len(criteria)
+        valid_criterion_ids: set[str] = {c["id"] for c in criteria}
+        criteria_id_list = ", ".join(
+            f"'{c['id']}' ({c['name']})" for c in criteria
+        )
+        valid_level_pts: dict[str, float] = {}
+        for c in criteria:
+            for lv in c.get("levels", []):
+                valid_level_pts[lv["id"]] = lv["points"]
+
         system_prompt = (
             "You are an expert academic grader. "
             "Grade the student submission against the rubric using the submit_grade tool.\n\n"
             f"Feedback format: {feedback_instruction}\n\n"
+            f"IMPORTANT: Submit EXACTLY {n_criteria} criterion_grades entries — one for each rubric "
+            f"criterion. Required criterion IDs: {criteria_id_list}. Each ID must appear exactly once. "
+            "If the student has organised their submission with multiple sub-sections per criterion "
+            "(e.g. headings like 'Clarity — Resource' and 'Clarity — Moderations'), read all "
+            "sub-sections holistically and return ONE grade entry for that rubric criterion. "
+            "Do not create additional entries for student-defined section headings.\n\n"
+            "IMPORTANT: For each criterion, set points_awarded to the exact Points value "
+            "shown in the rubric table for the level you select. Do not use any other number.\n\n"
             f"{context_section}"
             f"{attachments_section}"
             f"{rubric_md}"
@@ -252,10 +354,18 @@ class AIService:
                 raise
             for block in response.content:
                 if block.type == "tool_use" and block.name == "submit_grade":
-                    if block.input.get("criterion_grades"):
-                        return block.input
-                    last_exc = ValueError("AI returned empty criterion_grades — no criteria were graded")
-                    break
+                    grades = block.input.get("criterion_grades")
+                    if not grades:
+                        last_exc = ValueError("AI returned empty criterion_grades — no criteria were graded")
+                        break
+                    fixed, valid = _fix_criterion_grades(grades, valid_level_pts, valid_criterion_ids)
+                    if not valid:
+                        last_exc = ValueError(
+                            f"AI returned {len(grades)} criterion grades for a {n_criteria}-criterion "
+                            "rubric, or had invalid/duplicate criterion IDs, or invalid level_ids — retrying"
+                        )
+                        break
+                    return {**block.input, "criterion_grades": fixed}
             else:
                 last_exc = ValueError("Claude did not return a grade tool call")
 
@@ -324,6 +434,23 @@ class AIService:
             f"### Section {i + 1}\n{s}" for i, s in enumerate(original_sections)
         )
 
+        user_message = (
+            f"## Original Submission (context only — do not grade this)\n\n{original_block}\n\n"
+            f"## Moderation Comment (grade this)\n\n{moderation_comment}"
+        )
+
+        # Build validation lookups
+        criteria = rubric.get("criteria", [])
+        n_criteria = len(criteria)
+        valid_criterion_ids: set[str] = {c["id"] for c in criteria}
+        criteria_id_list = ", ".join(
+            f"'{c['id']}' ({c['name']})" for c in criteria
+        )
+        valid_level_pts: dict[str, float] = {}
+        for c in criteria:
+            for lv in c.get("levels", []):
+                valid_level_pts[lv["id"]] = lv["points"]
+
         system_prompt = (
             "You are an expert academic grader. "
             "You are grading a student's moderation comment. "
@@ -333,14 +460,16 @@ class AIService:
             "Treat the moderation comment as the primary work being graded. "
             "The original submission is provided only as context so you can judge the quality of the moderation.\n\n"
             f"Feedback format: {feedback_instruction}\n\n"
+            f"IMPORTANT: Submit EXACTLY {n_criteria} criterion_grades entries — one for each rubric "
+            f"criterion. Required criterion IDs: {criteria_id_list}. Each ID must appear exactly once. "
+            "If the original submission contains multiple sub-sections per criterion, treat them holistically "
+            "and return ONE grade entry per rubric criterion. "
+            "Do not create additional entries for student-defined section headings.\n\n"
+            "IMPORTANT: For each criterion, set points_awarded to the exact Points value "
+            "shown in the rubric table for the level you select. Do not use any other number.\n\n"
             f"{context_section}"
             f"{attachments_section}"
             f"{rubric_md}"
-        )
-
-        user_message = (
-            f"## Original Submission (context only — do not grade this)\n\n{original_block}\n\n"
-            f"## Moderation Comment (grade this)\n\n{moderation_comment}"
         )
 
         use_thinking = model in ("sonnet", "opus")
@@ -381,10 +510,18 @@ class AIService:
                 raise
             for block in response.content:
                 if block.type == "tool_use" and block.name == "submit_grade":
-                    if block.input.get("criterion_grades"):
-                        return block.input
-                    last_exc = ValueError("AI returned empty criterion_grades — no criteria were graded")
-                    break
+                    grades = block.input.get("criterion_grades")
+                    if not grades:
+                        last_exc = ValueError("AI returned empty criterion_grades — no criteria were graded")
+                        break
+                    fixed, valid = _fix_criterion_grades(grades, valid_level_pts, valid_criterion_ids)
+                    if not valid:
+                        last_exc = ValueError(
+                            f"AI returned {len(grades)} criterion grades for a {n_criteria}-criterion "
+                            "rubric, or had invalid/duplicate criterion IDs, or invalid level_ids — retrying"
+                        )
+                        break
+                    return {**block.input, "criterion_grades": fixed}
             else:
                 last_exc = ValueError("Claude did not return a grade tool call")
 

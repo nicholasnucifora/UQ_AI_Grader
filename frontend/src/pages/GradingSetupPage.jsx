@@ -6,10 +6,10 @@ import { api } from '../api/client'
 import {
   ButtonGroup,
   FeedbackFormatPicker,
-  LinkToggle,
   RubricBlock,
   TopicAttachmentManager,
   AI_MODELS,
+  cloneRubric,
 } from '../components/AssignmentShared'
 
 // ---------------------------------------------------------------------------
@@ -674,93 +674,98 @@ export default function GradingSetupPage() {
 
           {/* ── Rubric ── */}
           <div className="border-t border-gray-100 pt-4 space-y-3">
-            <div className="flex items-center gap-2">
-              <div>
-                <p className="text-sm font-medium text-gray-700">Rubric</p>
-                <p className="text-xs text-gray-400 mt-0.5">Changes here update the assignment rubric.</p>
-              </div>
-              {isRnM && (
-                <LinkToggle
-                  linked={sameRubric}
-                  onToggle={setSameRubric}
-                  linkedTip="Rubric is shared with moderations — click to use separate rubrics"
-                  unlinkedTip="Using separate rubrics — click to share the same rubric for both"
-                />
-              )}
-            </div>
-
-            {!rubricLinked ? (
-              <div className="space-y-4">
-                <div>
-                  <p className="text-xs font-medium text-gray-500 mb-2">Resources</p>
-                  <RubricBlock rubric={rubric} setRubric={setRubric} hasGrades={assignment?.has_grades ?? false} />
+            {isRnM ? (
+              <>
+                <div className="flex items-center gap-4 px-3 py-2 bg-gray-50 rounded-lg border border-gray-200">
+                  <span className="text-xs font-medium text-gray-500">Rubric Layout:</span>
+                  <label className="flex items-center gap-1.5 cursor-pointer">
+                    <input
+                      type="radio"
+                      name="rubric-layout"
+                      checked={sameRubric}
+                      onChange={() => setSameRubric(true)}
+                      className="text-indigo-600 focus:ring-indigo-500"
+                    />
+                    <span className="text-xs text-gray-700">Combined Rubric</span>
+                  </label>
+                  <label className="flex items-center gap-1.5 cursor-pointer">
+                    <input
+                      type="radio"
+                      name="rubric-layout"
+                      checked={!sameRubric}
+                      onChange={() => { if (sameRubric) setModerationRubric(cloneRubric(rubric)); setSameRubric(false) }}
+                      className="text-indigo-600 focus:ring-indigo-500"
+                    />
+                    <span className="text-xs text-gray-700">Separate Rubrics</span>
+                  </label>
                 </div>
-                <div>
-                  <p className="text-xs font-medium text-gray-500 mb-2">Moderations</p>
-                  <RubricBlock rubric={moderationRubric} setRubric={setModerationRubric} hasGrades={assignment?.has_grades ?? false} />
-                </div>
-              </div>
+                {sameRubric ? (
+                  <>
+                    <div>
+                      <p className="text-sm font-medium text-gray-700">
+                        Overall Rubric <span className="font-normal text-gray-400">(Resources + Moderations)</span>
+                      </p>
+                      <p className="text-xs text-gray-400 mt-0.5">Changes here update the assignment rubric.</p>
+                    </div>
+                    <RubricBlock rubric={rubric} setRubric={setRubric} hasGrades={assignment?.has_grades ?? false} />
+                  </>
+                ) : (
+                  <div className="space-y-4">
+                    <div>
+                      <div className="mb-2">
+                        <p className="text-sm font-medium text-gray-700">Resource Rubric</p>
+                        <p className="text-xs text-gray-400 mt-0.5">Changes here update the assignment rubric.</p>
+                      </div>
+                      <RubricBlock rubric={rubric} setRubric={setRubric} hasGrades={assignment?.has_grades ?? false} />
+                    </div>
+                    <div>
+                      <p className="text-sm font-medium text-gray-700 mb-2">Moderation Rubric</p>
+                      <RubricBlock rubric={moderationRubric} setRubric={setModerationRubric} hasGrades={assignment?.has_grades ?? false} />
+                    </div>
+                  </div>
+                )}
+              </>
             ) : (
-              <RubricBlock rubric={rubric} setRubric={setRubric} hasGrades={assignment?.has_grades ?? false} />
+              <>
+                <div>
+                  <p className="text-sm font-medium text-gray-700">Rubric</p>
+                  <p className="text-xs text-gray-400 mt-0.5">Changes here update the assignment rubric.</p>
+                </div>
+                <RubricBlock rubric={rubric} setRubric={setRubric} hasGrades={assignment?.has_grades ?? false} />
+              </>
             )}
           </div>
 
           {/* ── Additional Notes ── */}
-          <div className="border-t border-gray-100 pt-4">
-            {!notesLinked ? (
-              <div className="grid grid-cols-2 gap-6">
-                <div>
-                  <div className="flex items-center gap-1.5 mb-1">
-                    <label className="text-sm font-medium text-gray-700">
-                      Additional notes for AI
-                      <span className="ml-1.5 font-normal text-gray-400 text-xs">— shared with the assignment</span>
-                    </label>
-                    <LinkToggle
-                      linked={false}
-                      onToggle={setSameNotes}
-                      linkedTip=""
-                      unlinkedTip="Using separate notes — click to share the same notes for both"
-                    />
-                  </div>
-                  <p className="text-xs text-gray-400 mb-1">Resources</p>
-                  <textarea
-                    rows={4}
-                    className={inputCls}
-                    placeholder="Extra context for grading resources."
-                    value={additionalNotes}
-                    onChange={(e) => setAdditionalNotes(e.target.value)}
-                    disabled={isRunning}
+          <div className="border-t border-gray-100 pt-4 space-y-3">
+            {isRnM && (
+              <div className="flex items-center gap-4 px-3 py-2 bg-gray-50 rounded-lg border border-gray-200">
+                <span className="text-xs font-medium text-gray-500">Notes Layout:</span>
+                <label className="flex items-center gap-1.5 cursor-pointer">
+                  <input
+                    type="radio"
+                    name="notes-layout"
+                    checked={sameNotes}
+                    onChange={() => setSameNotes(true)}
+                    className="text-indigo-600 focus:ring-indigo-500"
                   />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">&nbsp;</label>
-                  <p className="text-xs text-gray-400 mb-1">Moderations</p>
-                  <textarea
-                    rows={4}
-                    className={inputCls}
-                    placeholder="Extra context for grading moderations."
-                    value={moderationNotes}
-                    onChange={(e) => setModerationNotes(e.target.value)}
-                    disabled={isRunning}
+                  <span className="text-xs text-gray-700">Combined Notes</span>
+                </label>
+                <label className="flex items-center gap-1.5 cursor-pointer">
+                  <input
+                    type="radio"
+                    name="notes-layout"
+                    checked={!sameNotes}
+                    onChange={() => setSameNotes(false)}
+                    className="text-indigo-600 focus:ring-indigo-500"
                   />
-                </div>
+                  <span className="text-xs text-gray-700">Separate Notes</span>
+                </label>
               </div>
-            ) : (
+            )}
+            {notesLinked ? (
               <div>
-                <div className="flex items-center gap-1.5 mb-1">
-                  <label className="text-sm font-medium text-gray-700">
-                    Additional notes for AI
-                    <span className="ml-1.5 font-normal text-gray-400 text-xs">— shared with the assignment</span>
-                  </label>
-                  {isRnM && (
-                    <LinkToggle
-                      linked={true}
-                      onToggle={setSameNotes}
-                      linkedTip="Notes are shared with moderations — click to use separate notes"
-                      unlinkedTip=""
-                    />
-                  )}
-                </div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Additional notes for AI</label>
                 <textarea
                   rows={4}
                   className={inputCls}
@@ -770,6 +775,34 @@ export default function GradingSetupPage() {
                   disabled={isRunning}
                 />
               </div>
+            ) : (
+              <>
+                <p className="text-sm font-medium text-gray-700">Additional notes for AI</p>
+                <div className="grid grid-cols-2 gap-6">
+                  <div>
+                    <p className="text-xs text-gray-400 mb-1">Resources</p>
+                    <textarea
+                      rows={4}
+                      className={inputCls}
+                      placeholder="Extra context for grading resources."
+                      value={additionalNotes}
+                      onChange={(e) => setAdditionalNotes(e.target.value)}
+                      disabled={isRunning}
+                    />
+                  </div>
+                  <div>
+                    <p className="text-xs text-gray-400 mb-1">Moderations</p>
+                    <textarea
+                      rows={4}
+                      className={inputCls}
+                      placeholder="Extra context for grading moderations."
+                      value={moderationNotes}
+                      onChange={(e) => setModerationNotes(e.target.value)}
+                      disabled={isRunning}
+                    />
+                  </div>
+                </div>
+              </>
             )}
           </div>
 

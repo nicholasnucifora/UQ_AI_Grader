@@ -450,15 +450,21 @@ def cancel_grading(
 def clear_ai_grades(
     class_id: int,
     assignment_id: int,
+    topics: str | None = Query(default=None),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """Clear AI-generated grades while preserving teacher marks.
     Rows with teacher grades have their AI fields nulled out;
     rows without teacher grades are deleted entirely.
-    The grading job is also deleted so AI grading can be restarted."""
+    Optional ?topics=Topic1,Topic2 limits clearing to those topics.
+    The grading job is only deleted when no topic filter is applied."""
     _require_class_teacher(class_id, current_user, db)
     _get_assignment_or_404(class_id, assignment_id, db)
+
+    topic_filter: set[str] | None = None
+    if topics:
+        topic_filter = {t.strip() for t in topics.split(",") if t.strip()}
 
     results = (
         db.query(GradeResult)
@@ -466,17 +472,43 @@ def clear_ai_grades(
         .all()
     )
     for r in results:
-        if r.teacher_criterion_grades:
+        if topic_filter is not None:
+            resource = db.get(RippleResource, r.ripple_resource_id) if r.ripple_resource_id else None
+            if resource is None and r.ripple_moderation_id:
+                mod = db.get(RippleModeration, r.ripple_moderation_id)
+                if mod:
+                    resource = (
+                        db.query(RippleResource)
+                        .filter(
+                            RippleResource.assignment_id == assignment_id,
+                            RippleResource.resource_id == mod.resource_id,
+                        )
+                        .first()
+                    )
+            result_topics = {t.strip() for t in (resource.topics or "").split(",") if t.strip()} if resource else set()
+            if not result_topics.intersection(topic_filter):
+                continue
+            # Partial clear: always keep the row so it stays visible as a pending issue.
+            r.criterion_grades = []
+            r.overall_feedback = None
+            r.error_message = None
+            r.status = "pending"
+        elif r.teacher_criterion_grades:
+            # Full clear, row has teacher marks: preserve row, wipe only AI fields.
             r.criterion_grades = []
             r.overall_feedback = None
             r.error_message = None
             r.status = "pending"
         else:
+            # Full clear, no teacher marks: delete the row entirely.
             db.delete(r)
 
-    job = db.query(GradingJob).filter(GradingJob.assignment_id == assignment_id).first()
-    if job is not None:
-        db.delete(job)
+    # Only delete the grading job when clearing all topics (no filter).
+    # Partial clears leave the job so the other topics remain visible.
+    if topic_filter is None:
+        job = db.query(GradingJob).filter(GradingJob.assignment_id == assignment_id).first()
+        if job is not None:
+            db.delete(job)
 
     db.commit()
     return Response(status_code=204)

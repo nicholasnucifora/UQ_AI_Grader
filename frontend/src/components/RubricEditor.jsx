@@ -29,6 +29,26 @@ function InlineNumber({ value, onChange, readOnly, className = '' }) {
   )
 }
 
+function HintTextarea({ value, onChange, placeholder }) {
+  const ref = useRef(null)
+  useEffect(() => {
+    if (!ref.current) return
+    ref.current.style.height = 'auto'
+    ref.current.style.height = ref.current.scrollHeight + 'px'
+  }, [value])
+  return (
+    <textarea
+      ref={ref}
+      rows={1}
+      className="w-full text-sm text-gray-700 bg-transparent focus:outline-none resize-none placeholder-gray-300 overflow-y-auto"
+      style={{ maxHeight: '6em' }}
+      placeholder={placeholder}
+      value={value}
+      onChange={onChange}
+    />
+  )
+}
+
 function InlineTextarea({ value, onChange, readOnly, className = '' }) {
   const ref = useRef(null)
   useEffect(() => {
@@ -259,9 +279,7 @@ function RubricGroup({ group, onUpdate, onDelete, readOnly, hasGrades, onAddRow,
                 <p className="text-xs font-medium text-indigo-500 mb-1">AI grading hint <span className="font-normal text-indigo-400">(hidden from students)</span></p>
                 {readOnly
                   ? <p className="text-sm text-gray-600">{criterion.ai_hint}</p>
-                  : <textarea
-                      className="w-full text-sm text-gray-700 bg-transparent focus:outline-none resize-none placeholder-gray-300"
-                      rows={2}
+                  : <HintTextarea
                       placeholder="e.g. Make sure to check whether the student referenced X…"
                       value={criterion.ai_hint ?? ''}
                       onChange={(e) => onUpdate({ ...criterion, ai_hint: e.target.value })}
@@ -464,26 +482,17 @@ export default function RubricEditor({ rubric, onChange, readOnly = false, hasGr
 
   return (
     <div className="space-y-3">
-      {/* Rubric title */}
-      <div className="flex items-center gap-2">
-        <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">Rubric title</span>
-        <InlineText
-          value={rubric.title}
-          onChange={(v) => onChange({ ...rubric, title: v })}
-          readOnly={readOnly}
-          className="text-lg font-bold text-gray-800"
-          placeholder="Rubric title"
-        />
-        {!readOnly && onDelete && (
+      {!readOnly && onDelete && !hasGrades && (
+        <div className="flex justify-end">
           <button
             type="button"
             onClick={onDelete}
-            className="ml-auto text-xs text-red-400 hover:text-red-600 border border-red-200 hover:border-red-400 px-2 py-0.5 rounded transition-colors"
+            className="text-xs text-red-400 hover:text-red-600 border border-red-200 hover:border-red-400 px-2 py-0.5 rounded transition-colors"
           >
             Delete Rubric
           </button>
-        )}
-      </div>
+        </div>
+      )}
 
       {/* Validation warnings */}
       {warnings.length > 0 && (

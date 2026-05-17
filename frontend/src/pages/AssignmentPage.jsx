@@ -85,6 +85,9 @@ export default function AssignmentPage() {
   const [rippleSkippedDetails, setRippleSkippedDetails] = useState([])
   const [showSkippedDetails, setShowSkippedDetails] = useState(false)
   const [clearingAiGrades, setClearingAiGrades] = useState(false)
+  const [clearMenuOpen, setClearMenuOpen] = useState(false)
+  const [clearSelectedTopics, setClearSelectedTopics] = useState(null) // null = all selected
+  const clearMenuRef = useRef(null)
   const [gradeJob, setGradeJob] = useState(null)
   const [gradeResults, setGradeResults] = useState(null)
   const [gradeReport, setGradeReport] = useState(null)
@@ -188,21 +191,36 @@ export default function AssignmentPage() {
     }
   }
 
+  function toggleClearTopic(topic) {
+    const current = clearSelectedTopics ?? new Set(exportTopicsList)
+    const next = new Set(current)
+    if (next.has(topic)) next.delete(topic)
+    else next.add(topic)
+    setClearSelectedTopics(next.size === exportTopicsList.length ? null : next)
+  }
+
   async function handleClearAiGrades() {
-    if (!window.confirm('This will remove all AI grades for this assignment. Teacher marks will be preserved. Continue?')) return
+    const isAll = clearSelectedTopics === null
+    const topicCount = clearSelectedTopics?.size ?? exportTopicsList.length
+    const confirmMsg = isAll
+      ? 'This will remove all AI grades for this assignment. Teacher marks will be preserved. Continue?'
+      : `This will remove AI grades for ${topicCount} selected topic(s). Teacher marks will be preserved. Continue?`
+    if (!window.confirm(confirmMsg)) return
+    setClearMenuOpen(false)
     setClearingAiGrades(true)
     setRippleMessage(null)
     try {
-      await api.clearAiGrades(classId, assignmentId)
-      // Clear synchronously so the marking panel immediately shows nothing stale
-      setGradeJob(null)
-      setGradeResults(null)
-      setGradeReport(null)
-      setTeacherResQueue([])
-      setTeacherModQueue([])
-      setActiveMainTab('grades')
-      setRippleMessage({ ok: true, text: 'AI grades cleared. Teacher marks were preserved.' })
-      // Re-fetch so pending rows (for teacher-marked submissions) reappear in the grades tab
+      await api.clearAiGrades(classId, assignmentId, clearSelectedTopics)
+      if (isAll) {
+        // Full clear — wipe local job state immediately so UI resets
+        setGradeJob(null)
+        setGradeResults(null)
+        setGradeReport(null)
+        setTeacherResQueue([])
+        setTeacherModQueue([])
+        setActiveMainTab('grades')
+      }
+      setRippleMessage({ ok: true, text: isAll ? 'AI grades cleared. Teacher marks were preserved.' : `AI grades cleared for ${topicCount} topic(s). Teacher marks were preserved.` })
       api.getGradeResults(classId, assignmentId).then(setGradeResults).catch(() => {})
     } catch (err) {
       setRippleMessage({ ok: false, text: err.message })
@@ -603,16 +621,42 @@ export default function AssignmentPage() {
   }
 
   const handleRegradeIssues = useCallback(async (targets) => {
-    setRegradeProgress({ done: 0, total: targets.length })
-    for (let i = 0; i < targets.length; i++) {
-      try {
-        const updated = await api.redoAiGrade(classId, assignmentId, targets[i].id, { amendment: null })
-        setGradeResults((prev) => prev.map((r) => (r.id === targets[i].id ? { ...r, ...updated } : r)))
-      } catch {
-        // submission stays in the list with its error status
+    const MAX_ROUNDS = 3
+    const attemptCount = {}
+    targets.forEach((t) => { attemptCount[t.id] = 0 })
+
+    let queue = [...targets]
+    let resolved = 0
+    const total = targets.length
+
+    setRegradeProgress({ done: 0, total, retrying: false })
+
+    while (queue.length > 0) {
+      const retrying = Object.values(attemptCount).some((n) => n > 0)
+      const nextQueue = []
+
+      for (const t of queue) {
+        attemptCount[t.id]++
+        let updated = null
+        try {
+          updated = await api.redoAiGrade(classId, assignmentId, t.id, { amendment: null })
+          setGradeResults((prev) => prev.map((r) => (r.id === t.id ? { ...r, ...updated } : r)))
+        } catch {
+          // leave state as-is; may retry below
+        }
+
+        const succeeded = (updated?.criterion_grades?.length ?? 0) > 0
+        if (succeeded || attemptCount[t.id] >= MAX_ROUNDS) {
+          resolved++
+          setRegradeProgress({ done: resolved, total, retrying })
+        } else {
+          nextQueue.push(t)
+        }
       }
-      setRegradeProgress({ done: i + 1, total: targets.length })
+
+      queue = nextQueue
     }
+
     // Rebuild marking queues once all done
     setGradeResults((prev) => {
       if (!prev) return prev
@@ -788,18 +832,81 @@ export default function AssignmentPage() {
                 )}
               </div>
               <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">
-                {activeGradeJob && (
-                  <button
-                    onClick={handleClearAiGrades}
-                    disabled={clearingAiGrades || rippleImporting}
-                    className={`px-3 py-1.5 text-sm rounded-lg border ${
-                      clearingAiGrades || rippleImporting
-                        ? 'border-gray-200 text-gray-400 cursor-not-allowed'
-                        : 'border-amber-300 text-amber-700 hover:bg-amber-50'
-                    }`}
-                  >
-                    {clearingAiGrades ? 'Clearing…' : 'Clear AI Grades'}
-                  </button>
+                {(activeGradeJob || (gradeResults && gradeResults.length > 0)) && (
+                  exportTopicsList.length > 0 ? (
+                    <div className="relative" ref={clearMenuRef}>
+                      <button
+                        onClick={() => setClearMenuOpen((o) => !o)}
+                        disabled={clearingAiGrades || rippleImporting}
+                        className={`px-3 py-1.5 text-sm rounded-lg border flex items-center gap-1.5 ${
+                          clearingAiGrades || rippleImporting
+                            ? 'border-gray-200 text-gray-400 cursor-not-allowed'
+                            : 'border-amber-300 text-amber-700 hover:bg-amber-50'
+                        }`}
+                      >
+                        {clearingAiGrades ? 'Clearing…' : 'Clear AI Grades'}
+                        {!clearingAiGrades && <span className="text-xs opacity-60">{clearMenuOpen ? '▲' : '▼'}</span>}
+                      </button>
+                      {clearMenuOpen && (
+                        <>
+                          <div className="fixed inset-0 z-10" onClick={() => setClearMenuOpen(false)} />
+                          <div className="absolute right-0 top-full mt-1 bg-white border border-gray-200 rounded-xl shadow-lg p-3 z-20 w-56">
+                            <div className="mb-3">
+                              <div className="flex items-center justify-between mb-1.5">
+                                <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Topics</p>
+                                <button
+                                  className="text-xs text-amber-600 hover:underline"
+                                  onClick={() => setClearSelectedTopics(
+                                    clearSelectedTopics === null ? new Set() : null
+                                  )}
+                                >
+                                  {clearSelectedTopics === null ? 'Deselect all' : 'Select all'}
+                                </button>
+                              </div>
+                              <div className="space-y-1.5 max-h-40 overflow-y-auto">
+                                {exportTopicsList.map((topic) => {
+                                  const checked = clearSelectedTopics === null || clearSelectedTopics.has(topic)
+                                  return (
+                                    <label key={topic} className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                                      <input
+                                        type="checkbox"
+                                        checked={checked}
+                                        onChange={() => toggleClearTopic(topic)}
+                                        className="accent-amber-600"
+                                      />
+                                      <span className="truncate">{topic}</span>
+                                    </label>
+                                  )
+                                })}
+                              </div>
+                            </div>
+                            <button
+                              onClick={handleClearAiGrades}
+                              disabled={clearSelectedTopics !== null && clearSelectedTopics.size === 0}
+                              className="w-full px-3 py-1.5 text-sm rounded-lg bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-40 disabled:cursor-not-allowed"
+                            >
+                              Clear AI Grades
+                            </button>
+                            {clearSelectedTopics !== null && clearSelectedTopics.size === 0 && (
+                              <p className="text-xs text-center text-gray-400 mt-1">Select at least one topic</p>
+                            )}
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  ) : (
+                    <button
+                      onClick={handleClearAiGrades}
+                      disabled={clearingAiGrades || rippleImporting}
+                      className={`px-3 py-1.5 text-sm rounded-lg border ${
+                        clearingAiGrades || rippleImporting
+                          ? 'border-gray-200 text-gray-400 cursor-not-allowed'
+                          : 'border-amber-300 text-amber-700 hover:bg-amber-50'
+                      }`}
+                    >
+                      {clearingAiGrades ? 'Clearing…' : 'Clear AI Grades'}
+                    </button>
+                  )
                 )}
                 {rippleStats && (rippleStats.resources > 0 || rippleStats.moderations > 0) && (
                   <button
@@ -1044,7 +1151,8 @@ export default function AssignmentPage() {
               <div className="flex items-center gap-2">
                 {regradeProgress ? (
                   <span className="text-sm text-gray-500">
-                    Regrading {regradeProgress.done} / {regradeProgress.total}…
+                    {regradeProgress.retrying ? 'Retrying failed' : 'Regrading'}{' '}
+                    {regradeProgress.done} / {regradeProgress.total}…
                   </span>
                 ) : regradeableIssues.length > 0 ? (
                   <button
@@ -1273,6 +1381,7 @@ export default function AssignmentPage() {
                       onRedoGrade={handleRedoAiGrade}
                       isRnM={isRnM}
                       startAtResultId={startAtResultId}
+                      assignment={assignment}
                     />
                   </div>
 
